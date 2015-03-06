@@ -67,7 +67,6 @@ extern "C" int scanhash_whirlpoolx(int thr_id, uint32_t *pdata,const uint32_t *p
 	whirlpoolx_precompute();
 	uint64_t n=pdata[19];
 	uint32_t foundNonce;
-	printf("0x%08X%08X\n",ptarget[7],ptarget[6]);
 	do {
 		if(n+throughput>=max_nonce){
 			applog(LOG_INFO, "GPU #%d: Preventing glitch.", thr_id);

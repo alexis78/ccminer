@@ -246,7 +246,7 @@ Options:\n\
 			x15         X15\n\
 			x17         X17 (peoplecurrency)\n\
 			whirl       Whirlcoin (old whirlpool)\n\
-			whirlpoolx  Whirlpoolx (Vanilla coin)\n\
+			whirlpoolx  Whirlpoolx (Vanillacoin)\n\
   -d, --devices         Comma separated list of CUDA devices to use.\n\
                         Device IDs start counting from 0! Alternatively takes\n\
                         string names of your cards like gtx780ti or gt640#2\n\
@@ -2237,7 +2237,8 @@ int main(int argc, char *argv[])
 #endif
 	printf("  Originally based on pooler cpuminer,\n");
 	printf("  CUDA support by Christian Buchner and Christian H.\n");
-	printf("  Include some of djm34 additions and sp optimisations\n\n");
+	printf("  Include some of djm34 additions and sp optimisations.\n");
+	printf("  Whirlpoolx support by alexis78.\n\n");
 
 	printf("BTC donation address: 1AJdfCpLWPNoAMDfHF1wD5y8VgKSSTHxPo\n\n");
 
