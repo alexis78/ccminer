@@ -506,7 +506,7 @@ static inline void scrypt_core(uint32_t *X, uint32_t *V)
 
 unsigned char *scrypt_buffer_alloc()
 {
-	return malloc(SCRYPT_BUFFER_SIZE);
+	return (unsigned char *)malloc(SCRYPT_BUFFER_SIZE);
 }
 
 static void scrypt_1024_1_1_256(const uint32_t *input, uint32_t *output,
@@ -701,8 +701,8 @@ int scanhash_scrypt(int thr_id, uint32_t *pdata,
 	uint32_t midstate[8];
 	uint32_t n = pdata[19] - 1;
 	const uint32_t Htarg = ptarget[7];
-	int throughput = scrypt_best_throughput();
-	int i;
+	uint32_t throughput =  scrypt_best_throughput();
+	uint32_t i;
 	
 #if HAVE_SHA256_4WAY
 	if (sha256_use_4way())
@@ -719,22 +719,22 @@ int scanhash_scrypt(int thr_id, uint32_t *pdata,
 		for (i = 0; i < throughput; i++)
 			data[i * 20 + 19] = ++n;
 		
-#if defined(HAVE_SHA256_4WAY)
+#if HAVE_SHA256_4WAY
 		if (throughput == 4)
 			scrypt_1024_1_1_256_4way(data, hash, midstate, scratchbuf);
 		else
 #endif
-#if defined(HAVE_SCRYPT_3WAY) && defined(HAVE_SHA256_4WAY)
+#if HAVE_SCRYPT_3WAY && HAVE_SHA256_4WAY
 		if (throughput == 12)
 			scrypt_1024_1_1_256_12way(data, hash, midstate, scratchbuf);
 		else
 #endif
-#if defined(HAVE_SCRYPT_6WAY)
+#if HAVE_SCRYPT_6WAY
 		if (throughput == 24)
 			scrypt_1024_1_1_256_24way(data, hash, midstate, scratchbuf);
 		else
 #endif
-#if defined(HAVE_SCRYPT_3WAY)
+#if HAVE_SCRYPT_3WAY
 		if (throughput == 3)
 			scrypt_1024_1_1_256_3way(data, hash, midstate, scratchbuf);
 		else

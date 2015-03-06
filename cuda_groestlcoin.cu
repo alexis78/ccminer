@@ -1,43 +1,33 @@
 // Auf Groestlcoin spezialisierte Version von Groestl inkl. Bitslice
 
-#include <cuda.h>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
-
 #include <stdio.h>
 #include <memory.h>
 
-// aus cpu-miner.c
-extern int device_map[8];
+#include "cuda_helper.h"
+#include <host_defines.h>
 
-// aus heavy.cu
-extern cudaError_t MyStreamSynchronize(cudaStream_t stream, int situation, int thr_id);
-
-// Folgende Definitionen später durch header ersetzen
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
-
-// diese Struktur wird in der Init Funktion angefordert
-static cudaDeviceProp props[8];
-
-// globaler Speicher für alle HeftyHashes aller Threads
+// globaler Speicher fÃ¼r alle HeftyHashes aller Threads
 __constant__ uint32_t pTarget[8]; // Single GPU
-extern uint32_t *d_resultNonce[8];
+extern uint32_t *d_resultNonce[MAX_GPUS];
 
 __constant__ uint32_t groestlcoin_gpu_msg[32];
 
-// 64 Register Variante für Compute 3.0
+#if __CUDA_ARCH__ >= 300
+
+// 64 Registers Variant for Compute 3.0
 #include "groestl_functions_quad.cu"
+
 #include "bitslice_transformations_quad.cu"
+#endif
 
-#define SWAB32(x)        ( ((x & 0x000000FF) << 24) | ((x & 0x0000FF00) << 8) | ((x & 0x00FF0000) >> 8) | ((x & 0xFF000000) >> 24) )
+#define SWAB32(x) cuda_swab32(x)
 
-__global__ void __launch_bounds__(256, 4)
- groestlcoin_gpu_hash_quad(int threads, uint32_t startNounce, uint32_t *resNounce)
+__global__ __launch_bounds__(256, 4)
+void groestlcoin_gpu_hash_quad(uint32_t threads, uint32_t startNounce, uint32_t *resNounce)
 {
+#if __CUDA_ARCH__ >= 300
     // durch 4 dividieren, weil jeweils 4 Threads zusammen ein Hash berechnen
-    int thread = (blockDim.x * blockIdx.x + threadIdx.x) / 4;
+    uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x) / 4;
     if (thread < threads)
     {
         // GROESTL
@@ -101,16 +91,15 @@ __global__ void __launch_bounds__(256, 4)
                     resNounce[0] = nounce;
         }
     }
+#endif
 }
 
 // Setup-Funktionen
-__host__ void groestlcoin_cpu_init(int thr_id, int threads)
+__host__ void groestlcoin_cpu_init(int thr_id, uint32_t threads)
 {
     cudaSetDevice(device_map[thr_id]);
 
-    cudaGetDeviceProperties(&props[thr_id], device_map[thr_id]);
-
-    // Speicher für Gewinner-Nonce belegen
+    // Speicher fÃ¼r Gewinner-Nonce belegen
     cudaMalloc(&d_resultNonce[thr_id], sizeof(uint32_t)); 
 }
 
@@ -127,8 +116,8 @@ __host__ void groestlcoin_cpu_setBlock(int thr_id, void *data, void *pTargetIn)
     msgBlock[20] = 0x80;
     msgBlock[31] = 0x01000000;
 
-    // groestl512 braucht hierfür keinen CPU-Code (die einzige Runde wird
-    // auf der GPU ausgeführt)
+    // groestl512 braucht hierfÃ¼r keinen CPU-Code (die einzige Runde wird
+    // auf der GPU ausgefÃ¼hrt)
 
     // Blockheader setzen (korrekte Nonce und Hefty Hash fehlen da drin noch)
     cudaMemcpyToSymbol( groestlcoin_gpu_msg,
@@ -141,9 +130,9 @@ __host__ void groestlcoin_cpu_setBlock(int thr_id, void *data, void *pTargetIn)
                         sizeof(uint32_t) * 8 );
 }
 
-__host__ void groestlcoin_cpu_hash(int thr_id, int threads, uint32_t startNounce, void *outputHashes, uint32_t *nounce)
+__host__ void groestlcoin_cpu_hash(int thr_id, uint32_t threads, uint32_t startNounce, void *outputHashes, uint32_t *nounce)
 {
-    int threadsperblock = 256;
+    uint32_t threadsperblock = 256;
 
     // Compute 3.0 benutzt die registeroptimierte Quad Variante mit Warp Shuffle
     // mit den Quad Funktionen brauchen wir jetzt 4 threads pro Hash, daher Faktor 4 bei der Blockzahl
@@ -153,8 +142,13 @@ __host__ void groestlcoin_cpu_hash(int thr_id, int threads, uint32_t startNounce
     dim3 grid(factor*((threads + threadsperblock-1)/threadsperblock));
     dim3 block(threadsperblock);
 
-    // Größe des dynamischen Shared Memory Bereichs
+    // GrÃ¶ÃŸe des dynamischen Shared Memory Bereichs
     size_t shared_size = 0;
+
+    if (device_sm[device_map[thr_id]] < 300) {
+        printf("Sorry, This algo is not supported by this GPU arch (SM 3.0 required)");
+        return;
+    }
 
     cudaMemset(d_resultNonce[thr_id], 0xFF, sizeof(uint32_t));
     groestlcoin_gpu_hash_quad<<<grid, block, shared_size>>>(threads, startNounce, d_resultNonce[thr_id]);

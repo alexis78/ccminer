@@ -14,12 +14,9 @@ extern "C" {
 #include <jansson.h>
 #include <curl/curl.h>
 
-#ifdef WIN32
-#define snprintf(...) _snprintf(__VA_ARGS__)
-#define strdup(x) _strdup(x)
-#define strncasecmp(x,y,z) _strnicmp(x,y,z)
-#define strcasecmp(x,y) _stricmp(x,y)
-typedef int ssize_t;
+#ifdef _MSC_VER
+#undef HAVE_ALLOCA_H
+#undef HAVE_SYSLOG_H
 #endif
 
 #ifdef STDC_HEADERS
@@ -30,6 +27,7 @@ typedef int ssize_t;
 #  include <stdlib.h>
 # endif
 #endif
+
 #ifdef HAVE_ALLOCA_H
 # include <alloca.h>
 #elif !defined alloca
@@ -48,8 +46,31 @@ void *alloca (size_t);
 # endif
 #endif
 
+#include "compat.h"
+
+#ifdef __INTELLISENSE__
+/* should be in stdint.h but... */
+typedef __int64 int64_t;
+typedef unsigned __int64 uint64_t;
+typedef __int32 int32_t;
+typedef unsigned __int32 uint32_t;
+typedef __int16 int16_t;
+typedef unsigned __int16 uint16_t;
+typedef __int16 int8_t;
+typedef unsigned __int16 uint8_t;
+
+typedef unsigned __int32 time_t;
+typedef char *  va_list;
+#endif
+
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ > 0
+# undef _ALIGN
+# define _ALIGN(x) __align__(x)
+#endif
+
 #ifdef HAVE_SYSLOG_H
 #include <syslog.h>
+#define LOG_BLUE 0x10 /* unique value */
 #else
 enum {
 	LOG_ERR,
@@ -57,8 +78,12 @@ enum {
 	LOG_NOTICE,
 	LOG_INFO,
 	LOG_DEBUG,
+	/* custom notices */
+	LOG_BLUE = 0x10,
 };
 #endif
+
+typedef unsigned char uchar;
 
 #undef unlikely
 #undef likely
@@ -74,11 +99,33 @@ enum {
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
+#ifndef max
+# define max(a, b)  ((a) > (b) ? (a) : (b))
+#endif
+#ifndef min
+# define min(a, b)  ((a) < (b) ? (a) : (b))
+#endif
+
+#ifndef UINT32_MAX
+/* for gcc 4.4 */
+#define UINT32_MAX UINT_MAX
+#endif
+
+static inline bool is_windows(void) {
+#ifdef WIN32
+        return 1;
+#else
+        return 0;
+#endif
+}
+
 #if ((__GNUC__ > 4) || (__GNUC__ == 4 && __GNUC_MINOR__ >= 3))
 #define WANT_BUILTIN_BSWAP
 #else
 #define bswap_32(x) ((((x) << 24) & 0xff000000u) | (((x) << 8) & 0x00ff0000u) \
                    | (((x) >> 8) & 0x0000ff00u) | (((x) >> 24) & 0x000000ffu))
+#define bswap_64(x) (((uint64_t) bswap_32((uint32_t)((x) & 0xffffffffu)) << 32) \
+                   | (uint64_t) bswap_32((uint32_t)((x) >> 32)))
 #endif
 
 static inline uint32_t swab32(uint32_t v)
@@ -88,6 +135,30 @@ static inline uint32_t swab32(uint32_t v)
 #else
 	return bswap_32(v);
 #endif
+}
+
+static inline uint64_t swab64(uint64_t v)
+{
+#ifdef WANT_BUILTIN_BSWAP
+	return __builtin_bswap64(v);
+#else
+	return bswap_64(v);
+#endif
+}
+
+static inline void swab256(void *dest_p, const void *src_p)
+{
+	uint32_t *dest = (uint32_t *) dest_p;
+	const uint32_t *src = (const uint32_t *) src_p;
+
+	dest[0] = swab32(src[7]);
+	dest[1] = swab32(src[6]);
+	dest[2] = swab32(src[5]);
+	dest[3] = swab32(src[4]);
+	dest[4] = swab32(src[3]);
+	dest[5] = swab32(src[2]);
+	dest[6] = swab32(src[1]);
+	dest[7] = swab32(src[0]);
 }
 
 #ifdef HAVE_SYS_ENDIAN_H
@@ -168,6 +239,10 @@ static inline void le16enc(void *pp, uint16_t x)
 }
 #endif
 
+/* used for struct work */
+void *aligned_calloc(int size);
+void aligned_free(void *ptr);
+
 #if JANSSON_MAJOR_VERSION >= 2
 #define JSON_LOADS(str, err_ptr) json_loads((str), 0, (err_ptr))
 #else
@@ -199,19 +274,27 @@ extern int scanhash_sha256d(int thr_id, uint32_t *pdata,
 
 extern unsigned char *scrypt_buffer_alloc();
 
-extern int scanhash_scrypt(int thr_id, uint32_t *pdata,
-	unsigned char *scratchbuf, const uint32_t *ptarget,
-	uint32_t max_nonce, unsigned long *hashes_done);
-
-extern int scanhash_heavy(int thr_id, uint32_t *pdata,
+extern int scanhash_deep(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
-	unsigned long *hashes_done, uint32_t maxvote, int blocklen);
+	unsigned long *hashes_done);
+
+extern int scanhash_doom(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
 
 extern int scanhash_fugue256(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
 extern int scanhash_groestlcoin(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_heavy(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done, uint32_t maxvote, int blocklen);
+
+extern int scanhash_keccak256(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
@@ -231,7 +314,39 @@ extern int scanhash_anime(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
+extern int scanhash_blake256(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done, int8_t blakerounds);
+
+extern int scanhash_fresh(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_lyra2(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
 extern int scanhash_nist5(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_pentablake(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_qubit(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_scrypt(int thr_id, uint32_t *pdata,
+	unsigned char *scratchbuf, const uint32_t *ptarget,
+	uint32_t max_nonce, unsigned long *hashes_done);
+
+extern int scanhash_s3(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_whc(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
@@ -243,14 +358,96 @@ extern int scanhash_x13(int thr_id, uint32_t *pdata,
 	const uint32_t *ptarget, uint32_t max_nonce,
 	unsigned long *hashes_done);
 
-extern void fugue256_hash(unsigned char* output, const unsigned char* input, int len);
-extern void heavycoin_hash(unsigned char* output, const unsigned char* input, int len);
-extern void groestlcoin_hash(unsigned char* output, const unsigned char* input, int len);
+extern int scanhash_x14(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_x15(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_x17(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+extern int scanhash_whirlpoolx(int thr_id, uint32_t *pdata,
+	const uint32_t *ptarget, uint32_t max_nonce,
+	unsigned long *hashes_done);
+
+/* api related */
+void *api_thread(void *userdata);
+void api_set_throughput(int thr_id, uint32_t throughput);
+
+struct cgpu_info {
+	uint8_t gpu_id;
+	uint8_t thr_id;
+	int accepted;
+	int rejected;
+	int hw_errors;
+	double khashes;
+	uint8_t intensity_int;
+	uint8_t has_monitoring;
+	float gpu_temp;
+	uint16_t gpu_fan;
+	uint16_t gpu_fan_rpm;
+	uint16_t gpu_arch;
+	int gpu_clock;
+	int gpu_memclock;
+	size_t gpu_mem;
+	uint32_t gpu_usage;
+	double gpu_vddc;
+	int16_t gpu_pstate;
+	int16_t gpu_bus;
+	uint16_t gpu_vid;
+	uint16_t gpu_pid;
+
+	int8_t nvml_id;
+	int8_t nvapi_id;
+
+	char gpu_sn[64];
+	char gpu_desc[64];
+	float intensity;
+	uint32_t throughput;
+};
+
+struct thr_api {
+	int id;
+	pthread_t pth;
+	struct thread_q	*q;
+};
+
+struct stats_data {
+	uint32_t uid;
+	uint32_t tm_stat;
+	uint32_t hashcount;
+	uint32_t height;
+	double difficulty;
+	double hashrate;
+	uint8_t thr_id;
+	uint8_t gpu_id;
+	uint8_t hashfound;
+	uint8_t ignored;
+};
+
+struct hashlog_data {
+	uint32_t tm_sent;
+	uint32_t height;
+	uint32_t njobid;
+	uint32_t nonce;
+	uint32_t scanned_from;
+	uint32_t scanned_to;
+	uint32_t last_from;
+	uint32_t tm_add;
+	uint32_t tm_upd;
+};
+
+/* end of api */
 
 struct thr_info {
 	int		id;
 	pthread_t	pth;
 	struct thread_q	*q;
+	struct cgpu_info gpu;
 };
 
 struct work_restart {
@@ -258,8 +455,13 @@ struct work_restart {
 	char			padding[128 - sizeof(unsigned long)];
 };
 
+extern bool opt_benchmark;
 extern bool opt_debug;
+extern bool opt_quiet;
 extern bool opt_protocol;
+extern bool opt_tracegpu;
+extern int opt_n_threads;
+extern int active_gpus;
 extern int opt_timeout;
 extern bool want_longpoll;
 extern bool have_longpoll;
@@ -269,23 +471,70 @@ extern char *opt_cert;
 extern char *opt_proxy;
 extern long opt_proxy_type;
 extern bool use_syslog;
+extern bool use_colors;
 extern pthread_mutex_t applog_lock;
 extern struct thr_info *thr_info;
 extern int longpoll_thr_id;
 extern int stratum_thr_id;
+extern int api_thr_id;
 extern struct work_restart *work_restart;
 extern bool opt_trust_pool;
 extern uint16_t opt_vote;
 
+extern uint64_t global_hashrate;
+extern double   global_diff;
+
+#define MAX_GPUS 16
+extern char* device_name[MAX_GPUS];
+extern short device_map[MAX_GPUS];
+extern long  device_sm[MAX_GPUS];
+extern uint32_t gpus_intensity[MAX_GPUS];
+
+#define CL_N    "\x1B[0m"
+#define CL_RED  "\x1B[31m"
+#define CL_GRN  "\x1B[32m"
+#define CL_YLW  "\x1B[33m"
+#define CL_BLU  "\x1B[34m"
+#define CL_MAG  "\x1B[35m"
+#define CL_CYN  "\x1B[36m"
+
+#define CL_BLK  "\x1B[22;30m" /* black */
+#define CL_RD2  "\x1B[22;31m" /* red */
+#define CL_GR2  "\x1B[22;32m" /* green */
+#define CL_YL2  "\x1B[22;33m" /* dark yellow */
+#define CL_BL2  "\x1B[22;34m" /* blue */
+#define CL_MA2  "\x1B[22;35m" /* magenta */
+#define CL_CY2  "\x1B[22;36m" /* cyan */
+#define CL_SIL  "\x1B[22;37m" /* gray */
+
+#ifdef WIN32
+#define CL_GRY  "\x1B[01;30m" /* dark gray */
+#else
+#define CL_GRY  "\x1B[90m"    /* dark gray selectable in putty */
+#endif
+#define CL_LRD  "\x1B[01;31m" /* light red */
+#define CL_LGR  "\x1B[01;32m" /* light green */
+#define CL_LYL  "\x1B[01;33m" /* tooltips */
+#define CL_LBL  "\x1B[01;34m" /* light blue */
+#define CL_LMA  "\x1B[01;35m" /* light magenta */
+#define CL_LCY  "\x1B[01;36m" /* light cyan */
+
+#define CL_WHT  "\x1B[01;37m" /* white */
+
+extern void format_hashrate(double hashrate, char *output);
 extern void applog(int prio, const char *fmt, ...);
+void get_defconfig_path(char *out, size_t bufsize, char *argv0);
 extern json_t *json_rpc_call(CURL *curl, const char *url, const char *userpass,
 	const char *rpc_req, bool, bool, int *);
-extern char *bin2hex(const unsigned char *p, size_t len);
+extern void cbin2hex(char *out, const char *in, size_t len);
+extern char *bin2hex(const unsigned char *in, size_t len);
 extern bool hex2bin(unsigned char *p, const char *hexstr, size_t len);
 extern int timeval_subtract(struct timeval *result, struct timeval *x,
 	struct timeval *y);
 extern bool fulltest(const uint32_t *hash, const uint32_t *target);
 extern void diff_to_target(uint32_t *target, double diff);
+extern void get_currentalgo(char* buf, int sz);
+extern uint32_t device_intensity(int thr_id, const char *func, uint32_t defcount);
 
 struct stratum_job {
 	char *job_id;
@@ -300,6 +549,7 @@ struct stratum_job {
 	unsigned char ntime[4];
 	bool clean;
 	unsigned char nreward[2];
+	uint32_t height;
 	double diff;
 };
 
@@ -322,6 +572,34 @@ struct stratum_ctx {
 	size_t xnonce2_size;
 	struct stratum_job job;
 	pthread_mutex_t work_lock;
+
+	struct timeval tv_submit;
+	uint32_t answer_msec;
+	uint32_t disconnects;
+	time_t tm_connected;
+
+	int srvtime_diff;
+};
+
+struct work {
+	uint32_t data[32];
+	uint32_t target[8];
+	uint32_t maxvote;
+
+	char job_id[128];
+	size_t xnonce2_len;
+	uchar xnonce2[32];
+
+	union {
+		uint32_t u32[2];
+		uint64_t u64[1];
+	} noncerange;
+
+	double difficulty;
+	uint32_t height;
+
+	uint32_t scanned_from;
+	uint32_t scanned_to;
 };
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout);
@@ -333,6 +611,25 @@ bool stratum_subscribe(struct stratum_ctx *sctx);
 bool stratum_authorize(struct stratum_ctx *sctx, const char *user, const char *pass);
 bool stratum_handle_method(struct stratum_ctx *sctx, const char *s);
 
+void hashlog_remember_submit(struct work* work, uint32_t nonce);
+void hashlog_remember_scan_range(struct work* work);
+uint32_t hashlog_already_submittted(char* jobid, uint32_t nounce);
+uint32_t hashlog_get_last_sent(char* jobid);
+uint64_t hashlog_get_scan_range(char* jobid);
+int  hashlog_get_history(struct hashlog_data *data, int max_records);
+void hashlog_purge_old(void);
+void hashlog_purge_job(char* jobid);
+void hashlog_purge_all(void);
+void hashlog_dump_job(char* jobid);
+void hashlog_getmeminfo(uint64_t *mem, uint32_t *records);
+
+void stats_remember_speed(int thr_id, uint32_t hashcount, double hashrate, uint8_t found, uint32_t height);
+double stats_get_speed(int thr_id, double def_speed);
+int  stats_get_history(int thr_id, struct stats_data *data, int max_records);
+void stats_purge_old(void);
+void stats_purge_all(void);
+void stats_getmeminfo(uint64_t *mem, uint32_t *records);
+
 struct thread_q;
 
 extern struct thread_q *tq_new(void);
@@ -341,6 +638,40 @@ extern bool tq_push(struct thread_q *tq, void *data);
 extern void *tq_pop(struct thread_q *tq, const struct timespec *abstime);
 extern void tq_freeze(struct thread_q *tq);
 extern void tq_thaw(struct thread_q *tq);
+
+void parse_arg(int key, char *arg);
+void proper_exit(int reason);
+
+size_t time2str(char* buf, time_t timer);
+char* atime2str(time_t timer);
+
+void applog_hash(unsigned char *hash);
+void applog_compare_hash(unsigned char *hash, unsigned char *hash2);
+
+void print_hash_tests(void);
+void animehash(void *state, const void *input);
+void blake256hash(void *output, const void *input, int8_t rounds);
+void deephash(void *state, const void *input);
+void doomhash(void *state, const void *input);
+void fresh_hash(void *state, const void *input);
+void fugue256_hash(unsigned char* output, const unsigned char* input, int len);
+void heavycoin_hash(unsigned char* output, const unsigned char* input, int len);
+void keccak256_hash(void *state, const void *input);
+unsigned int jackpothash(void *state, const void *input);
+void groestlhash(void *state, const void *input);
+void lyra2_hash(void *state, const void *input);
+void myriadhash(void *state, const void *input);
+void nist5hash(void *state, const void *input);
+void pentablakehash(void *output, const void *input);
+void quarkhash(void *state, const void *input);
+void qubithash(void *state, const void *input);
+void s3hash(void *output, const void *input);
+void wcoinhash(void *state, const void *input);
+void x11hash(void *output, const void *input);
+void x13hash(void *output, const void *input);
+void x14hash(void *output, const void *input);
+void x15hash(void *output, const void *input);
+void x17hash(void *output, const void *input);
 
 #ifdef __cplusplus
 }
