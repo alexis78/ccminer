@@ -95,14 +95,14 @@ extern "C" int scanhash_veltor(int thr_id, struct work* work, uint32_t max_nonce
 		init[thr_id] = true;
 	}
 
-	uint32_t endiandata[20];
-	for (int k=0; k < 20; k++)
-		be32enc(&endiandata[k], pdata[k]);
+        uint32_t endiandata[20];
+        for (int k=0; k < 20; k++)
+                be32enc(&endiandata[k], pdata[k]);
 
-	skein512_cpu_setBlock_80(endiandata);
+        skein512_cpu_setBlock_80(endiandata);
 
-	cudaMemset(d_resNonce[thr_id], 0xff, NBN*sizeof(uint32_t));
-	streebog_set_target(ptarget);
+        cudaMemset(d_resNonce[thr_id], 0xff, NBN*sizeof(uint32_t));
+        streebog_set_target(ptarget);
 	
 	do {
 		skein512_cpu_hash_80(thr_id, throughput, pdata[19], d_hash[thr_id]);

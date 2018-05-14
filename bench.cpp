@@ -60,7 +60,7 @@ void algo_free_all(int thr_id){
 	free_x11(thr_id);
 	free_x11evo(thr_id);
 	free_c11(thr_id);
-	free_sib(thr_id);
+	free_poly(thr_id);
 	free_x13(thr_id);
 	free_x14(thr_id);
 	free_x15(thr_id);

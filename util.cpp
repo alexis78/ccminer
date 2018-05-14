@@ -2182,7 +2182,7 @@ void print_hash_tests(void){
 	c11hash(&hash[0], &buf[0]);
 	printpfx("c11", hash);
 
-	sibhash(&hash[0], &buf[0]);
+	polyhash(&hash[0], &buf[0]);
 	printpfx("sib", hash);
 	
 	x13hash(&hash[0], &buf[0]);

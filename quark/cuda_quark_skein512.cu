@@ -420,8 +420,150 @@ void skein512_gpu_hash_80(uint32_t threads, uint32_t startNounce, uint64_t *outp
 	}
 
 }
-
 __host__
+void skein512_cpu_setBlock_80( void *pdata)
+{
+        uint64_t message[20];
+        memcpy(&message[0], pdata, 80);
+
+        uint64_t p[8];
+        uint64_t h[9];
+        uint64_t t0, t1, t2;
+
+        h[0] = 0x4903ADFF749C51CEull;
+        h[1] = 0x0D95DE399746DF03ull;
+        h[2] = 0x8FD1934127C79BCEull;
+        h[3] = 0x9A255629FF352CB1ull;
+        h[4] = 0x5DB62599DF6CA7B0ull;
+        h[5] = 0xEABE394CA9D5C3F4ull;
+        h[6] = 0x991112C71A75B523ull;
+        h[7] = 0xAE18A40B660FCC33ull;
+        // h[8] = h[0] ^ h[1] ^ h[2] ^ h[3] ^ h[4] ^ h[5] ^ h[6] ^ h[7] ^ SPH_C64(0x1BD11BDAA9FC1A22);
+        h[8] = 0xcab2076d98173ec4ULL;
+
+        t0 = 64; // ptr
+        t1 = 0x7000000000000000ull;
+        t2 = 0x7000000000000040ull;
+
+        memcpy(&p[0], &message[0], 64);
+
+        TFBIG_4e_PRE(0);
+        TFBIG_4o_PRE(1);
+        TFBIG_4e_PRE(2);
+        TFBIG_4o_PRE(3);
+        TFBIG_4e_PRE(4);
+        TFBIG_4o_PRE(5);
+        TFBIG_4e_PRE(6);
+        TFBIG_4o_PRE(7);
+        TFBIG_4e_PRE(8);
+        TFBIG_4o_PRE(9);
+        TFBIG_4e_PRE(10);
+        TFBIG_4o_PRE(11);
+        TFBIG_4e_PRE(12);
+        TFBIG_4o_PRE(13);
+        TFBIG_4e_PRE(14);
+        TFBIG_4o_PRE(15);
+        TFBIG_4e_PRE(16);
+        TFBIG_4o_PRE(17);
+        TFBIG_ADDKEY_PRE(p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], h, t, 18);
+        message[10] = message[0] ^ p[0];
+        message[11] = message[1] ^ p[1];
+        message[12] = message[2] ^ p[2];
+        message[13] = message[3] ^ p[3];
+        message[14] = message[4] ^ p[4];
+        message[15] = message[5] ^ p[5];
+        message[16] = message[6] ^ p[6];
+        message[17] = message[7] ^ p[7];
+        message[18] = t2;
+
+        uint64_t buffer[128];
+
+//      buffer[ 0] = message[ 8];
+        buffer[ 0] = message[ 9];
+        h[0] = buffer[ 1] = message[10];
+        h[1] = buffer[ 2] = message[11];
+        h[2] = buffer[ 3] = message[12];
+        h[3] = buffer[ 4] = message[13];
+        h[4] = buffer[ 5] = message[14];
+        h[5] = buffer[ 6] = message[15];
+        h[6] = buffer[ 7] = message[16];
+        h[7] = buffer[ 8] = message[17];
+        h[8] = buffer[ 9] = h[0]^h[1]^h[2]^h[3]^h[4]^h[5]^h[6]^h[7]^0x1BD11BDAA9FC1A22ULL;
+
+        t0 = 0x50ull;
+        t1 = 0xB000000000000000ull;
+        t2 = t0^t1;
+
+        p[0] = message[ 8] + h[0];
+        p[2] = h[2]; p[3] = h[3]; p[4] = h[4];
+        p[5] = h[5] + t0;
+        p[6] = h[6] + t1;
+        p[7] = h[7];
+
+        p[2] += p[3];
+        p[4] += p[5]; p[6] += p[7];
+
+        p[3] = ROTL64(p[3], 36) ^ p[2];
+        p[5] = ROTL64(p[5], 19) ^ p[4];
+        p[7] = ROTL64(p[7], 37) ^ p[6];
+        p[4] += p[7]; p[6] += p[5];
+
+        p[7] = ROTL64(p[7], 27) ^ p[4];
+        p[5] = ROTL64(p[5], 14) ^ p[6];
+        buffer[10] = p[ 0];
+        buffer[11] = p[ 2];
+        buffer[12] = p[ 3];
+        buffer[13] = p[ 4];
+        buffer[14] = p[ 5];
+        buffer[15] = p[ 6];
+        buffer[16] = p[ 7];
+        buffer[17] = ROTL64(p[3], 42);
+        buffer[18] = ROTL64(p[5], 36);
+        buffer[19] = ROTL64(p[7], 39);
+
+        buffer[20] = h[6]+t1;
+        buffer[21] = h[8]+1;
+        buffer[22] = h[7]+t2;
+        buffer[23] = h[0]+2;
+        buffer[24] = h[8]+t0;
+        buffer[25] = h[1]+3;
+        buffer[26] = h[0]+t1;
+        buffer[27] = h[2]+4;
+        buffer[28] = h[1]+t2;
+        buffer[29] = h[3]+5;
+        buffer[30] = h[2]+t0;
+        buffer[31] = h[4]+6;
+        buffer[32] = h[3]+t1;
+        buffer[33] = h[5]+7;
+        buffer[34] = h[4]+t2;
+        buffer[35] = h[6]+8;
+        buffer[36] = h[5]+t0;
+        buffer[37] = h[7]+9;
+        buffer[38] = h[6]+t1;
+        buffer[39] = h[8]+10;
+        buffer[40] = h[7]+t2;
+        buffer[41] = h[0]+11;
+        buffer[42] = h[8]+t0;
+        buffer[43] = h[1]+12;
+        buffer[44] = h[0]+t1;
+        buffer[45] = h[2]+13;
+        buffer[46] = h[1]+t2;
+        buffer[47] = h[3]+14;
+        buffer[48] = h[2]+t0;
+        buffer[49] = h[4]+15;
+        buffer[50] = h[3]+t1;
+        buffer[51] = h[5]+16;
+        buffer[52] = h[4]+t2;
+        buffer[53] = h[6]+17;
+        buffer[54] = h[5]+t0;
+        buffer[55] = h[7]+18;
+        buffer[56] = h[6]+t1;
+
+        buffer[57] = message[ 8];
+
+        cudaMemcpyToSymbol(c_buffer, buffer, sizeof(c_buffer), 0, cudaMemcpyHostToDevice);
+}
+/*
 void skein512_cpu_setBlock_80(void *pdata)
 {
 	uint64_t message[20];
@@ -564,7 +706,7 @@ void skein512_cpu_setBlock_80(void *pdata)
 
 	CUDA_SAFE_CALL(cudaGetLastError());
 }
-
+*/
 __host__
 void skein512_cpu_hash_80(int thr_id, uint32_t threads, uint32_t startNounce, uint32_t *g_hash)
 {
