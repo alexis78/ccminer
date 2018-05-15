@@ -7,7 +7,8 @@
 #include "cuda_vectors.h"
 #include "miner.h"
 
-#define TPB 512
+//#define TPB 512
+#define TPB 384
 
 /* 1344 bytes */
 __constant__ static uint32_t c_E8[42][8] = {
@@ -240,7 +241,8 @@ static void E8(uint32_t x[8][4])
 	}
 }
 //----------------------------------------------------------------------------------------------------------
-__global__ __launch_bounds__(TPB)
+__global__
+__launch_bounds__(TPB)
 void quark_jh512_gpu_hash_64(uint32_t threads, uint32_t* g_hash, const uint32_t* __restrict__ g_nonceVector){
 
 	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
@@ -284,7 +286,8 @@ void quark_jh512_gpu_hash_64(uint32_t threads, uint32_t* g_hash, const uint32_t*
 	}
 }
 
-__global__ __launch_bounds__(TPB)
+__global__
+__launch_bounds__(TPB)
 void quark_jh512_gpu_hash_64_final(uint32_t threads,const uint32_t* __restrict__ g_hash, const uint32_t *const __restrict__ g_nonceVector,uint32_t *resNonce, const uint2 target){
 
 	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
