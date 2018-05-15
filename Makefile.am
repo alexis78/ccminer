@@ -64,6 +64,7 @@ ccminer_SOURCES	= elist.h miner.h compat.h \
 			x15/whirlpool.cu \
 			x17/cuda_x17_haval256.cu x17/cuda_x17_sha512.cu \
 			x17/x17.cu \
+			phi/phi.cu \
 			lbry/cuda_sha256_lbry.cu lbry/cuda_sha512_lbry.cu \
 			lbry/cuda_lbry_merged.cu \
 			lbry/lbry.cu \

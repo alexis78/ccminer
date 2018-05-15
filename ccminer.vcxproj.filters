@@ -88,6 +88,9 @@
     <Filter Include="Source Files\CUDA\streebog">
       <UniqueIdentifier>{8433e87e-02db-4d16-b07b-daa99d116867}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Source Files\CUDA\phi">
+      <UniqueIdentifier>{920804ce-0a45-4453-94bd-11c78c0b0346}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="compat\jansson\dump.c">
@@ -641,6 +644,12 @@
       <Filter>Source Files\CUDA\x13</Filter>
     </CudaCompile>
     <CudaCompile Include="x13\hsr.cu">
+      <Filter>Source Files\CUDA\x13</Filter>
+    </CudaCompile>
+    <CudaCompile Include="phi\phi.cu">
+      <Filter>Source Files\CUDA\phi</Filter>
+    </CudaCompile>
+    <CudaCompile Include="x13\cuda_x13_fugue512.cu">
       <Filter>Source Files\CUDA\x13</Filter>
     </CudaCompile>
   </ItemGroup>

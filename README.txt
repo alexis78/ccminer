@@ -84,17 +84,18 @@ its command line interface and options.
 			x11         X11              (DarkCoin)
 			c11         C11              (Chaincoin)
 			sib         X11+gost         (Sibcoin)
+			phi         PHI1612          (Lux)
 			x11evo      Permuted x11     (Revolver)
 			x13         X13              (MaruCoin)
 			x14         X14              (BernCoin)
 			x15         X15              (Joincoin)
 			x17         X17              (XVG)
 			whirlpool   whirlpool        (JoinCoin)
-                        lbry        Lbry             (Library Credits)
-                        neoscrypt   Neoscrypt        (FTC/PXC/UFO)
-                        sia         Sia              (SIAcoin)
-                        myr-gr      Myriad-Groestl   (SFR/AUR/DGB/XVG/MYR)
-                        veltor      Thor's Riddle(?) (Veltor)
+			lbry        Lbry             (Library Credits)
+			neoscrypt   Neoscrypt        (FTC/PXC/UFO)
+			sia         Sia              (SIAcoin)
+			myr-gr      Myriad-Groestl   (SFR/AUR/DGB/XVG/MYR)
+			veltor      Thor's Riddle(?) (Veltor)
 
   -d, --devices         gives a comma separated list of CUDA device IDs
                         to operate on. Device IDs start counting from 0!

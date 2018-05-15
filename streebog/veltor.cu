@@ -9,8 +9,8 @@ extern "C" {
 #include "cuda_helper.h"
 #include "x11/cuda_x11.h"
 
-extern void streebog_cpu_hash_64_final(int thr_id, uint32_t threads, uint32_t *d_hash,uint32_t* d_resNonce);
-extern void streebog_set_target(const uint32_t* ptarget);
+//extern void streebog_cpu_hash_64_final(int thr_id, uint32_t threads, uint32_t *d_hash,uint32_t* d_resNonce);
+//extern void streebog_set_target(const uint32_t* ptarget);
 extern void x14_shabal512_cpu_hash_64(int thr_id, uint32_t threads, uint32_t *d_hash);
 
 extern void skein512_cpu_setBlock_80(void *pdata);
@@ -102,13 +102,13 @@ extern "C" int scanhash_veltor(int thr_id, struct work* work, uint32_t max_nonce
 	skein512_cpu_setBlock_80(endiandata);
 
 	cudaMemset(d_resNonce[thr_id], 0xff, NBN*sizeof(uint32_t));
-	streebog_set_target(ptarget);
+	//streebog_set_target(ptarget);
 	
 	do {
 		skein512_cpu_hash_80(thr_id, throughput, pdata[19], d_hash[thr_id]);
 		x11_shavite512_cpu_hash_64(thr_id, throughput, d_hash[thr_id]);
 		x14_shabal512_cpu_hash_64(thr_id, throughput, d_hash[thr_id]);
-		streebog_cpu_hash_64_final(thr_id, throughput, d_hash[thr_id], d_resNonce[thr_id]);
+		//streebog_cpu_hash_64_final(thr_id, throughput, d_hash[thr_id], d_resNonce[thr_id]);
 
 		cudaMemcpy(h_resNonce[thr_id], d_resNonce[thr_id], NBN*sizeof(uint32_t), cudaMemcpyDeviceToHost);
 		

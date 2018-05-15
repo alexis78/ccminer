@@ -230,6 +230,7 @@ Options:\n\
 			x11         X11              (DarkCoin)\n\
 			c11         C11              (Chaincoin)\n\
 			sib         X11+gost         (Sibcoin)\n\
+			phi         PHI1612          (LuxCoin)\n\
 			x11evo      Permuted x11     (Revolver)\n\
 			x13         X13              (MaruCoin)\n\
 			x14         X14              (BernCoin)\n\
@@ -684,9 +685,9 @@ static bool work_decode(const json_t *val, struct work *work)
 	return true;
 }
 
-#define YES "yes!"
-#define YAY "yay!!!"
-#define BOO "booooo"
+#define YES "[YES]"
+#define YAY "[YAY]"
+#define BOO "[BOO]"
 
 int share_result(int result, int pooln, double sharediff, const char *reason)
 {
@@ -714,20 +715,20 @@ int share_result(int result, int pooln, double sharediff, const char *reason)
 
 	if (!net_diff || sharediff < net_diff) {
 		flag = use_colors ?
-			(result ? CL_GRN YES : CL_RED BOO)
-		:	(result ? "(" YES ")" : "(" BOO ")");
+			(result ? CL_GRN YES CL_N : CL_RED BOO CL_N)
+		:	(result ? YES : BOO);
 	} else {
 		p->solved_count++;
 		flag = use_colors ?
-			(result ? CL_GRN YAY : CL_RED BOO)
-		:	(result ? "(" YAY ")" : "(" BOO ")");
+			(result ? CL_YLW YAY CL_N : CL_RED BOO CL_N)
+		:	(result ? YAY : BOO);
 	}
 
-	applog(LOG_NOTICE, "[S/A/T]: %lu/%lu/%lu, diff: %2.3f, %s %s",p->solved_count, p->accepted_count, p->accepted_count + p->rejected_count,sharediff, s, flag);
+	applog(LOG_NOTICE, "%s [S/A/T]: %lu/%lu/%lu, diff: %2.3f, %s", flag, p->solved_count, p->accepted_count, p->accepted_count + p->rejected_count, sharediff, s);
 	if (reason) {
-		applog(LOG_WARNING, "reject reason: %s", reason);
+		applog(LOG_WARNING, "Reject reason: %s", reason);
 		if (!check_dups && strncasecmp(reason, "duplicate", 9) == 0) {
-			applog(LOG_WARNING, "enabling duplicates check feature");
+			applog(LOG_WARNING, "Enabling duplicates check feature");
 			check_dups = true;
 			g_work_time = 0;
 		}
@@ -1929,6 +1930,7 @@ static void *miner_thread(void *userdata)
 					break;
 				case ALGO_NEOSCRYPT:
 				case ALGO_SIB:
+				case ALGO_PHI:
 				case ALGO_VELTOR:
 				case ALGO_LYRA2:
 					minmax = 0x80000;
@@ -2065,6 +2067,9 @@ static void *miner_thread(void *userdata)
 				break;
 			case ALGO_SIB:
 				rc = scanhash_sib(thr_id, &work, max_nonce, &hashes_done);
+				break;
+			case ALGO_PHI:
+				rc = scanhash_phi(thr_id, &work, max_nonce, &hashes_done);
 				break;
 			case ALGO_VELTOR:
 				rc = scanhash_veltor(thr_id, &work, max_nonce, &hashes_done);
@@ -3190,7 +3195,7 @@ void parse_arg(int key, char *arg)
 			char * pch = strtok (arg,",");
 			opt_n_threads = 0;
 			while (pch != NULL && opt_n_threads < MAX_GPUS) {
-				if (pch[0] >= '0' && pch[0] <= '9')
+				if (pch[0] >= '0' && pch[0] <= '9' && pch[1] == '\0')
 				{
 					if (atoi(pch) < ngpus)
 						device_map[opt_n_threads++] = atoi(pch);
@@ -3422,6 +3427,7 @@ int main(int argc, char *argv[])
 	// get opt_quiet early
 	parse_single_opt('q', argc, argv);
 
+	
 	char comment_toolkit[30];
 	if(((int)(CUDART_VERSION/1000)==7) && ((int)((CUDART_VERSION % 1000)/10)==5))
 		strcpy(comment_toolkit, "Recommended");
@@ -3429,6 +3435,7 @@ int main(int argc, char *argv[])
 		strcpy(comment_toolkit, "Not recommended prefer 7.5");
 		
 	printf("*** " PROGRAM_NAME " " PACKAGE_VERSION " for nVidia GPUs from alexis78@github ***\n");
+	printf("*** " PROGRAM_NAME " " PACKAGE_VERSION " compiled by nemosminer@github ***\n");
 	if (!opt_quiet) {
 #ifdef _MSC_VER
 		printf("*** Built with VC++ 2013 and nVidia CUDA SDK %d.%d (%s)\n\n",
@@ -3438,7 +3445,8 @@ int main(int argc, char *argv[])
 			CUDART_VERSION/1000, (CUDART_VERSION % 1000)/10, comment_toolkit);
 		printf("*** Based on tpruvot@github ccminer\n");
 		printf("*** Originally based on Christian Buchner and Christian H. project\n");
-		printf("*** Include some of the work of djm34, sp, tsiv and klausT.\n\n");
+		printf("*** Include some of the work of djm34, sp, tsiv and klausT.\n");
+		printf("			Alexis78-v1.2 \n\n");
 	}
 
 	rpc_user = strdup("");

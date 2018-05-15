@@ -234,7 +234,7 @@ void format_hashrate(double hashrate, char *output){
 		hashrate *= 1e-12;
 	}
 
-	sprintf(output,prefix ? "%.2f%cH/s" : "%.2fH/s%c",hashrate, prefix);
+	sprintf(output,prefix ? "%.2f %cH/s" : "%.2fH/s %c",hashrate, prefix);
 }
 
 static void databuf_free(struct data_buffer *db)
@@ -2184,6 +2184,9 @@ void print_hash_tests(void){
 
 	sibhash(&hash[0], &buf[0]);
 	printpfx("sib", hash);
+
+	phihash(&hash[0], &buf[0]);
+	printpfx("phi", hash);
 	
 	x13hash(&hash[0], &buf[0]);
 	printpfx("X13", hash);

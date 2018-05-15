@@ -72,7 +72,8 @@ static void echo_round(const uint32_t sharedMemory[4][256], uint32_t *W, uint32_
 	}
 }
 
-__global__ __launch_bounds__(256, 3) /* will force 80 registers */
+__global__
+__launch_bounds__(256, 3) /* will force 80 registers */
 static void x11_echo512_gpu_hash_64_final(uint32_t threads, uint64_t *g_hash,uint32_t* resNonce, const uint64_t target){
 	__shared__ uint32_t sharedMemory[4][256];
 

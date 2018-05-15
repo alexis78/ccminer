@@ -345,6 +345,7 @@
     <CudaCompile Include="neoscrypt\cuda_neoscrypt.cu" />
     <CudaCompile Include="neoscrypt\neoscrypt.cu" />
     <CudaCompile Include="nist5\cuda_nist5.cu" />
+    <CudaCompile Include="phi\phi.cu" />
     <CudaCompile Include="quark\cuda_keccak_skein512.cu" />
     <CudaCompile Include="sia.cu" />
     <CudaCompile Include="skein\skein.cu" />
@@ -411,6 +412,7 @@
     <CudaCompile Include="x11\x11.cu" />
     <CudaCompile Include="x11\x11evo.cu" />
     <CudaCompile Include="x13\cuda_hsr_sm3.cu" />
+    <CudaCompile Include="x13\cuda_x13_fugue512.cu" />
     <CudaCompile Include="x13\cuda_x13_hamsi_fugue512.cu">
       <MaxRegCount>72</MaxRegCount>
     </CudaCompile>
