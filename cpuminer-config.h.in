@@ -46,6 +46,9 @@
 /* Define to 1 if you have the `ssl' library (-lssl). */
 #undef HAVE_LIBSSL
 
+/* Define to 1 if you have the `z' library (-lz). */
+#undef HAVE_LIBZ
+
 /* Define to 1 if you have the <memory.h> header file. */
 #undef HAVE_MEMORY_H
 
@@ -145,9 +148,6 @@
 /* Defined if libcurl supports TFTP */
 #undef LIBCURL_PROTOCOL_TFTP
 
-/* Define to 1 if your C compiler doesn't accept -c and -o together. */
-#undef NO_MINUS_C_MINUS_O
-
 /* Name of package */
 #undef PACKAGE
 
@@ -179,15 +179,6 @@
 
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
-
-/* Define to 1 if AVX assembly is available. */
-#undef USE_AVX
-
-/* Define to 1 if AVX2 assembly is available. */
-#undef USE_AVX2
-
-/* Define to 1 if XOP assembly is available. */
-#undef USE_XOP
 
 /* Version number of package */
 #undef VERSION

@@ -1,180 +1,416 @@
-#include <cuda.h>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+/*
+	Based upon Tanguy Pruvot's repo
+	
+	Provos Alexis - 2016
+*/
 
 #include <stdio.h>
 #include <memory.h>
 
-// Folgende Definitionen später durch header ersetzen
-typedef unsigned char uint8_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
-
-// aus heavy.cu
-extern cudaError_t MyStreamSynchronize(cudaStream_t stream, int situation, int thr_id);
-
 #include "cuda_helper.h"
+#include "cuda_vectors.h"
+#include "miner.h"
 
-#define U32TO64_LE(p) \
-    (((uint64_t)(*p)) | (((uint64_t)(*(p + 1))) << 32))
+#define TPB52 128
+#define TPB50 256
 
-#define U64TO32_LE(p, v) \
-    *p = (uint32_t)((v)); *(p+1) = (uint32_t)((v) >> 32);
-
-static const uint64_t host_keccak_round_constants[24] = {
-    0x0000000000000001ull, 0x0000000000008082ull,
-    0x800000000000808aull, 0x8000000080008000ull,
-    0x000000000000808bull, 0x0000000080000001ull,
-    0x8000000080008081ull, 0x8000000000008009ull,
-    0x000000000000008aull, 0x0000000000000088ull,
-    0x0000000080008009ull, 0x000000008000000aull,
-    0x000000008000808bull, 0x800000000000008bull,
-    0x8000000000008089ull, 0x8000000000008003ull,
-    0x8000000000008002ull, 0x8000000000000080ull,
-    0x000000000000800aull, 0x800000008000000aull,
-    0x8000000080008081ull, 0x8000000000008080ull,
-    0x0000000080000001ull, 0x8000000080008008ull
+__constant__ 
+uint2 keccak_round_constants[24] = {
+		{ 0x00000001, 0x00000000 }, { 0x00008082, 0x00000000 },	{ 0x0000808a, 0x80000000 }, { 0x80008000, 0x80000000 },
+		{ 0x0000808b, 0x00000000 }, { 0x80000001, 0x00000000 },	{ 0x80008081, 0x80000000 }, { 0x00008009, 0x80000000 },
+		{ 0x0000008a, 0x00000000 }, { 0x00000088, 0x00000000 },	{ 0x80008009, 0x00000000 }, { 0x8000000a, 0x00000000 },
+		{ 0x8000808b, 0x00000000 }, { 0x0000008b, 0x80000000 },	{ 0x00008089, 0x80000000 }, { 0x00008003, 0x80000000 },
+		{ 0x00008002, 0x80000000 }, { 0x00000080, 0x80000000 },	{ 0x0000800a, 0x00000000 }, { 0x8000000a, 0x80000000 },
+		{ 0x80008081, 0x80000000 }, { 0x00008080, 0x80000000 },	{ 0x80000001, 0x00000000 }, { 0x80008008, 0x80000000 }
 };
 
-__constant__ uint64_t c_keccak_round_constants[24];
+#if __CUDA_ARCH__ > 500
+__global__ __launch_bounds__(TPB52,7)
+#else
+__global__ __launch_bounds__(TPB50,3)
+#endif
+void quark_keccak512_gpu_hash_64(uint32_t threads, uint2* g_hash, uint32_t *g_nonceVector){
+	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
+	uint2 t[5], u[5], v, w;
+	uint2 s[25];
+	if (thread < threads){
+	
+		const uint32_t hashPosition = (g_nonceVector == NULL) ? thread : g_nonceVector[thread];
 
-static __device__ __forceinline__ void
-keccak_block(uint64_t *s, const uint32_t *in, const uint64_t *keccak_round_constants) {
-    size_t i;
-    uint64_t t[5], u[5], v, w;
+		uint2x4* d_hash = (uint2x4 *)&g_hash[hashPosition * 8];
 
-    /* absorb input */
-#pragma unroll 9
-    for (i = 0; i < 72 / 8; i++, in += 2)
-        s[i] ^= U32TO64_LE(in);
-    
-    for (i = 0; i < 24; i++) {
-        /* theta: c = a[0,i] ^ a[1,i] ^ .. a[4,i] */
-        t[0] = s[0] ^ s[5] ^ s[10] ^ s[15] ^ s[20];
-        t[1] = s[1] ^ s[6] ^ s[11] ^ s[16] ^ s[21];
-        t[2] = s[2] ^ s[7] ^ s[12] ^ s[17] ^ s[22];
-        t[3] = s[3] ^ s[8] ^ s[13] ^ s[18] ^ s[23];
-        t[4] = s[4] ^ s[9] ^ s[14] ^ s[19] ^ s[24];
+		#if __CUDA_ARCH__ > 500
+		*(uint2x4*)&s[ 0] = __ldg4(&d_hash[ 0]);
+		*(uint2x4*)&s[ 4] = __ldg4(&d_hash[ 1]);
+		#else
+		*(uint2x4*)&s[ 0] = d_hash[ 0];
+		*(uint2x4*)&s[ 4] = d_hash[ 1];		
+		#endif
+		
+		s[8] = make_uint2(1,0x80000000);
 
-        /* theta: d[i] = c[i+4] ^ rotl(c[i+1],1) */
-        u[0] = t[4] ^ ROTL64(t[1], 1);
-        u[1] = t[0] ^ ROTL64(t[2], 1);
-        u[2] = t[1] ^ ROTL64(t[3], 1);
-        u[3] = t[2] ^ ROTL64(t[4], 1);
-        u[4] = t[3] ^ ROTL64(t[0], 1);
+		/*theta*/
+		t[ 0] = vectorize(devectorize(s[ 0])^devectorize(s[ 5]));
+		t[ 1] = vectorize(devectorize(s[ 1])^devectorize(s[ 6]));
+		t[ 2] = vectorize(devectorize(s[ 2])^devectorize(s[ 7]));
+		t[ 3] = vectorize(devectorize(s[ 3])^devectorize(s[ 8]));
+		t[ 4] = s[4];
+		
+		/*theta*/
+		#pragma unroll 5
+		for(int j=0;j<5;j++){
+			u[ j] = ROL2(t[ j], 1);
+		}
+		
+		s[ 4] = xor3x(s[ 4], t[3], u[ 0]);
+		s[24] = s[19] = s[14] = s[ 9] = t[ 3] ^ u[ 0];
 
-        /* theta: a[0,i], a[1,i], .. a[4,i] ^= d[i] */
-        s[0] ^= u[0]; s[5] ^= u[0]; s[10] ^= u[0]; s[15] ^= u[0]; s[20] ^= u[0];
-        s[1] ^= u[1]; s[6] ^= u[1]; s[11] ^= u[1]; s[16] ^= u[1]; s[21] ^= u[1];
-        s[2] ^= u[2]; s[7] ^= u[2]; s[12] ^= u[2]; s[17] ^= u[2]; s[22] ^= u[2];
-        s[3] ^= u[3]; s[8] ^= u[3]; s[13] ^= u[3]; s[18] ^= u[3]; s[23] ^= u[3];
-        s[4] ^= u[4]; s[9] ^= u[4]; s[14] ^= u[4]; s[19] ^= u[4]; s[24] ^= u[4];
+		s[ 0] = xor3x(s[ 0], t[4], u[ 1]);
+		s[ 5] = xor3x(s[ 5], t[4], u[ 1]);
+		s[20] = s[15] = s[10] = t[4] ^ u[ 1];
 
-        /* rho pi: b[..] = rotl(a[..], ..) */
-        v = s[ 1];
-        s[ 1] = ROTL64(s[ 6], 44);
-        s[ 6] = ROTL64(s[ 9], 20);
-        s[ 9] = ROTL64(s[22], 61);
-        s[22] = ROTL64(s[14], 39);
-        s[14] = ROTL64(s[20], 18);
-        s[20] = ROTL64(s[ 2], 62);
-        s[ 2] = ROTL64(s[12], 43);
-        s[12] = ROTL64(s[13], 25);
-        s[13] = ROTL64(s[19],  8);
-        s[19] = ROTL64(s[23], 56);
-        s[23] = ROTL64(s[15], 41);
-        s[15] = ROTL64(s[ 4], 27);
-        s[ 4] = ROTL64(s[24], 14);
-        s[24] = ROTL64(s[21],  2);
-        s[21] = ROTL64(s[ 8], 55);
-        s[ 8] = ROTL64(s[16], 45);
-        s[16] = ROTL64(s[ 5], 36);
-        s[ 5] = ROTL64(s[ 3], 28);
-        s[ 3] = ROTL64(s[18], 21);
-        s[18] = ROTL64(s[17], 15);
-        s[17] = ROTL64(s[11], 10);
-        s[11] = ROTL64(s[ 7],  6);
-        s[ 7] = ROTL64(s[10],  3);
-        s[10] = ROTL64(    v,  1);
+		s[ 1] = xor3x(s[ 1], t[0], u[ 2]);
+		s[ 6] = xor3x(s[ 6], t[0], u[ 2]);
+		s[21] = s[16] = s[11] = t[0] ^ u[ 2];
+		
+		s[ 2] = xor3x(s[ 2], t[1], u[ 3]);
+		s[ 7] = xor3x(s[ 7], t[1], u[ 3]);
+		s[22] = s[17] = s[12] = t[1] ^ u[ 3];
+		
+		s[ 3] = xor3x(s[ 3], t[2], u[ 4]);s[ 8] = xor3x(s[ 8], t[2], u[ 4]);
+		s[23] = s[18] = s[13] = t[2] ^ u[ 4];
+		/* rho pi: b[..] = rotl(a[..], ..) */
+		v = s[1];
+		s[1]  = ROL2(s[6], 44);
+		s[6]  = ROL2(s[9], 20);
+		s[9]  = ROL2(s[22], 61);
+		s[22] = ROL2(s[14], 39);
+		s[14] = ROL2(s[20], 18);
+		s[20] = ROL2(s[2], 62);
+		s[2]  = ROL2(s[12], 43);
+		s[12] = ROL2(s[13], 25);
+		s[13] = ROL8(s[19]);
+		s[19] = ROR8(s[23]);
+		s[23] = ROL2(s[15], 41);
+		s[15] = ROL2(s[4], 27);
+		s[4]  = ROL2(s[24], 14);
+		s[24] = ROL2(s[21], 2);
+		s[21] = ROL2(s[8], 55);
+		s[8]  = ROL2(s[16], 45);
+		s[16] = ROL2(s[5], 36);
+		s[5]  = ROL2(s[3], 28);
+		s[3]  = ROL2(s[18], 21);
+		s[18] = ROL2(s[17], 15);
+		s[17] = ROL2(s[11], 10);
+		s[11] = ROL2(s[7], 6);
+		s[7]  = ROL2(s[10], 3);
+		s[10] = ROL2(v, 1);
+		/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+		#pragma unroll 5
+		for(int j=0;j<25;j+=5){
+			v=s[j];w=s[j + 1];s[j] = chi(v,w,s[j+2]);s[j+1] = chi(w,s[j+2],s[j+3]);s[j+2]=chi(s[j+2],s[j+3],s[j+4]);s[j+3]=chi(s[j+3],s[j+4],v);s[j+4]=chi(s[j+4],v,w);
+		}
+		/* iota: a[0,0] ^= round constant */
+		s[0] ^= keccak_round_constants[ 0];
 
-        /* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
-        v = s[ 0]; w = s[ 1]; s[ 0] ^= (~w) & s[ 2]; s[ 1] ^= (~s[ 2]) & s[ 3]; s[ 2] ^= (~s[ 3]) & s[ 4]; s[ 3] ^= (~s[ 4]) & v; s[ 4] ^= (~v) & w;
-        v = s[ 5]; w = s[ 6]; s[ 5] ^= (~w) & s[ 7]; s[ 6] ^= (~s[ 7]) & s[ 8]; s[ 7] ^= (~s[ 8]) & s[ 9]; s[ 8] ^= (~s[ 9]) & v; s[ 9] ^= (~v) & w;
-        v = s[10]; w = s[11]; s[10] ^= (~w) & s[12]; s[11] ^= (~s[12]) & s[13]; s[12] ^= (~s[13]) & s[14]; s[13] ^= (~s[14]) & v; s[14] ^= (~v) & w;
-        v = s[15]; w = s[16]; s[15] ^= (~w) & s[17]; s[16] ^= (~s[17]) & s[18]; s[17] ^= (~s[18]) & s[19]; s[18] ^= (~s[19]) & v; s[19] ^= (~v) & w;
-        v = s[20]; w = s[21]; s[20] ^= (~w) & s[22]; s[21] ^= (~s[22]) & s[23]; s[22] ^= (~s[23]) & s[24]; s[23] ^= (~s[24]) & v; s[24] ^= (~v) & w;
+		#if __CUDA_ARCH__ > 500
+		#pragma unroll 4
+		#else
+		#pragma unroll 3
+		#endif
+		for (int i = 1; i < 23; i++) {
+			/*theta*/
+			#pragma unroll 5
+			for(int j=0;j<5;j++){
+				t[ j] = vectorize(xor5(devectorize(s[ j]),devectorize(s[j+5]),devectorize(s[j+10]),devectorize(s[j+15]),devectorize(s[j+20])));
+			}
 
-        /* iota: a[0,0] ^= round constant */
-        s[0] ^= keccak_round_constants[i];
-    }
+			/*theta*/
+			#pragma unroll 5
+			for(int j=0;j<5;j++){
+				u[ j] = ROL2(t[ j], 1);
+			}
+			s[ 4] = xor3x(s[ 4], t[3], u[ 0]);s[ 9] = xor3x(s[ 9], t[3], u[ 0]);s[14] = xor3x(s[14], t[3], u[ 0]);s[19] = xor3x(s[19], t[3], u[ 0]);s[24] = xor3x(s[24], t[3], u[ 0]);
+			s[ 0] = xor3x(s[ 0], t[4], u[ 1]);s[ 5] = xor3x(s[ 5], t[4], u[ 1]);s[10] = xor3x(s[10], t[4], u[ 1]);s[15] = xor3x(s[15], t[4], u[ 1]);s[20] = xor3x(s[20], t[4], u[ 1]);
+			s[ 1] = xor3x(s[ 1], t[0], u[ 2]);s[ 6] = xor3x(s[ 6], t[0], u[ 2]);s[11] = xor3x(s[11], t[0], u[ 2]);s[16] = xor3x(s[16], t[0], u[ 2]);s[21] = xor3x(s[21], t[0], u[ 2]);
+			s[ 2] = xor3x(s[ 2], t[1], u[ 3]);s[ 7] = xor3x(s[ 7], t[1], u[ 3]);s[12] = xor3x(s[12], t[1], u[ 3]);s[17] = xor3x(s[17], t[1], u[ 3]);s[22] = xor3x(s[22], t[1], u[ 3]);
+			s[ 3] = xor3x(s[ 3], t[2], u[ 4]);s[ 8] = xor3x(s[ 8], t[2], u[ 4]);s[13] = xor3x(s[13], t[2], u[ 4]);s[18] = xor3x(s[18], t[2], u[ 4]);s[23] = xor3x(s[23], t[2], u[ 4]);
+
+			/* rho pi: b[..] = rotl(a[..], ..) */
+			v = s[1];
+			s[1]  = ROL2(s[6], 44);
+			s[6]  = ROL2(s[9], 20);
+			s[9]  = ROL2(s[22], 61);
+			s[22] = ROL2(s[14], 39);
+			s[14] = ROL2(s[20], 18);
+			s[20] = ROL2(s[2], 62);
+			s[2]  = ROL2(s[12], 43);
+			s[12] = ROL2(s[13], 25);
+			s[13] = ROL8(s[19]);
+			s[19] = ROR8(s[23]);
+			s[23] = ROL2(s[15], 41);
+			s[15] = ROL2(s[4], 27);
+			s[4]  = ROL2(s[24], 14);
+			s[24] = ROL2(s[21], 2);
+			s[21] = ROL2(s[8], 55);
+			s[8]  = ROL2(s[16], 45);
+			s[16] = ROL2(s[5], 36);
+			s[5]  = ROL2(s[3], 28);
+			s[3]  = ROL2(s[18], 21);
+			s[18] = ROL2(s[17], 15);
+			s[17] = ROL2(s[11], 10);
+			s[11] = ROL2(s[7], 6);
+			s[7]  = ROL2(s[10], 3);
+			s[10] = ROL2(v, 1);
+
+			/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+			#pragma unroll 5
+			for(int j=0;j<25;j+=5){
+				v=s[j];w=s[j + 1];s[j] = chi(v,w,s[j+2]);s[j+1] = chi(w,s[j+2],s[j+3]);s[j+2]=chi(s[j+2],s[j+3],s[j+4]);s[j+3]=chi(s[j+3],s[j+4],v);s[j+4]=chi(s[j+4],v,w);
+			}
+
+			/* iota: a[0,0] ^= round constant */
+			s[0] ^= keccak_round_constants[i];
+		}
+		/*theta*/
+		#pragma unroll 5
+		for(int j=0;j<5;j++){
+			t[ j] = xor3x(xor3x(s[j+0],s[j+5],s[j+10]),s[j+15],s[j+20]);
+		}
+		/*theta*/
+		#pragma unroll 5
+		for(int j=0;j<5;j++){
+			u[ j] = ROL2(t[ j], 1);
+		}
+		s[ 9] = xor3x(s[ 9], t[3], u[ 0]);
+		s[24] = xor3x(s[24], t[3], u[ 0]);
+		s[ 0] = xor3x(s[ 0], t[4], u[ 1]);
+		s[10] = xor3x(s[10], t[4], u[ 1]);
+		s[ 6] = xor3x(s[ 6], t[0], u[ 2]);
+		s[16] = xor3x(s[16], t[0], u[ 2]);
+		s[12] = xor3x(s[12], t[1], u[ 3]);
+		s[22] = xor3x(s[22], t[1], u[ 3]);
+		s[ 3] = xor3x(s[ 3], t[2], u[ 4]);
+		s[18] = xor3x(s[18], t[2], u[ 4]);
+		/* rho pi: b[..] = rotl(a[..], ..) */
+		s[ 1]  = ROL2(s[ 6], 44);
+		s[ 2]  = ROL2(s[12], 43);
+		s[ 5]  = ROL2(s[ 3], 28);
+		s[ 7]  = ROL2(s[10], 3);
+		s[ 3]  = ROL2(s[18], 21);
+		s[ 4]  = ROL2(s[24], 14);
+		s[ 6]  = ROL2(s[ 9], 20);
+		s[ 8]  = ROL2(s[16], 45);
+		s[ 9]  = ROL2(s[22], 61);
+		/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+		v=s[ 0];w=s[ 1];s[ 0] = chi(v,w,s[ 2]);s[ 1] = chi(w,s[ 2],s[ 3]);s[ 2]=chi(s[ 2],s[ 3],s[ 4]);s[ 3]=chi(s[ 3],s[ 4],v);s[ 4]=chi(s[ 4],v,w);		
+		v=s[ 5];w=s[ 6];s[ 5] = chi(v,w,s[ 7]);s[ 6] = chi(w,s[ 7],s[ 8]);s[ 7]=chi(s[ 7],s[ 8],s[ 9]);
+		/* iota: a[0,0] ^= round constant */
+		s[0] ^= keccak_round_constants[23];
+		
+		d_hash[0] = *(uint2x4*)&s[0];
+		d_hash[1] = *(uint2x4*)&s[4];
+
+	}
 }
 
-__global__ void quark_keccak512_gpu_hash_64(int threads, uint32_t startNounce, uint64_t *g_hash, uint32_t *g_nonceVector)
-{
-    int thread = (blockDim.x * blockIdx.x + threadIdx.x);
-    if (thread < threads)
-    {
-        uint32_t nounce = (g_nonceVector != NULL) ? g_nonceVector[thread] : (startNounce + thread);
+#if __CUDA_ARCH__ > 500
+__global__ __launch_bounds__(TPB52,6)
+#else
+__global__ __launch_bounds__(TPB50,3)
+#endif
+void quark_keccak512_gpu_hash_64_final(uint32_t threads, uint2* g_hash, uint32_t* g_nonceVector, uint32_t *resNonce, const uint64_t target){
+	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
+	uint2 t[5], u[5], v, w;
+	uint2 s[25];
+	if (thread < threads){
+	
+		const uint32_t hashPosition = g_nonceVector[thread];
 
-        int hashPosition = nounce - startNounce;
-        uint32_t *inpHash = (uint32_t*)&g_hash[8 * hashPosition];
+		uint2x4* d_hash = (uint2x4 *)&g_hash[hashPosition * 8];
 
-        // Nachricht kopieren
-        uint32_t message[18];
-#pragma unroll 16
-        for(int i=0;i<16;i++)
-            message[i] = inpHash[i];
+		#if __CUDA_ARCH__ > 500
+		*(uint2x4*)&s[ 0] = __ldg4(&d_hash[ 0]);
+		*(uint2x4*)&s[ 4] = __ldg4(&d_hash[ 1]);
+		#else
+		*(uint2x4*)&s[ 0] = d_hash[ 0];
+		*(uint2x4*)&s[ 4] = d_hash[ 1];		
+		#endif
+		
+		s[8] = make_uint2(1,0x80000000);
 
-        message[16] = 0x01;
-        message[17] = 0x80000000;
+		/*theta*/
+		t[ 0] = vectorize(devectorize(s[ 0])^devectorize(s[ 5]));
+		t[ 1] = vectorize(devectorize(s[ 1])^devectorize(s[ 6]));
+		t[ 2] = vectorize(devectorize(s[ 2])^devectorize(s[ 7]));
+		t[ 3] = vectorize(devectorize(s[ 3])^devectorize(s[ 8]));
+		t[ 4] = s[4];
+		
+		/*theta*/
+		#pragma unroll 5
+		for(int j=0;j<5;j++){
+			u[ j] = ROL2(t[ j], 1);
+		}
+		
+		s[ 4] = xor3x(s[ 4], t[3], u[ 0]);
+		s[24] = s[19] = s[14] = s[ 9] = t[ 3] ^ u[ 0];
 
-        // State initialisieren
-        uint64_t keccak_gpu_state[25];
-#pragma unroll 25
-        for (int i=0; i<25; i++)
-            keccak_gpu_state[i] = 0;
+		s[ 0] = xor3x(s[ 0], t[4], u[ 1]);
+		s[ 5] = xor3x(s[ 5], t[4], u[ 1]);
+		s[20] = s[15] = s[10] = t[4] ^ u[ 1];
 
-        // den Block einmal gut durchschütteln
-        keccak_block(keccak_gpu_state, message, c_keccak_round_constants);
+		s[ 1] = xor3x(s[ 1], t[0], u[ 2]);
+		s[ 6] = xor3x(s[ 6], t[0], u[ 2]);
+		s[21] = s[16] = s[11] = t[0] ^ u[ 2];
+		
+		s[ 2] = xor3x(s[ 2], t[1], u[ 3]);
+		s[ 7] = xor3x(s[ 7], t[1], u[ 3]);
+		s[22] = s[17] = s[12] = t[1] ^ u[ 3];
+		
+		s[ 3] = xor3x(s[ 3], t[2], u[ 4]);s[ 8] = xor3x(s[ 8], t[2], u[ 4]);
+		s[23] = s[18] = s[13] = t[2] ^ u[ 4];
+		/* rho pi: b[..] = rotl(a[..], ..) */
+		v = s[1];
+		s[1]  = ROL2(s[6], 44);
+		s[6]  = ROL2(s[9], 20);
+		s[9]  = ROL2(s[22], 61);
+		s[22] = ROL2(s[14], 39);
+		s[14] = ROL2(s[20], 18);
+		s[20] = ROL2(s[2], 62);
+		s[2]  = ROL2(s[12], 43);
+		s[12] = ROL2(s[13], 25);
+		s[13] = ROL8(s[19]);
+		s[19] = ROR8(s[23]);
+		s[23] = ROL2(s[15], 41);
+		s[15] = ROL2(s[4], 27);
+		s[4]  = ROL2(s[24], 14);
+		s[24] = ROL2(s[21], 2);
+		s[21] = ROL2(s[8], 55);
+		s[8]  = ROL2(s[16], 45);
+		s[16] = ROL2(s[5], 36);
+		s[5]  = ROL2(s[3], 28);
+		s[3]  = ROL2(s[18], 21);
+		s[18] = ROL2(s[17], 15);
+		s[17] = ROL2(s[11], 10);
+		s[11] = ROL2(s[7], 6);
+		s[7]  = ROL2(s[10], 3);
+		s[10] = ROL2(v, 1);
+		/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+		#pragma unroll 5
+		for(int j=0;j<25;j+=5){
+			v=s[j];w=s[j + 1];s[j] = chi(v,w,s[j+2]);s[j+1] = chi(w,s[j+2],s[j+3]);s[j+2]=chi(s[j+2],s[j+3],s[j+4]);s[j+3]=chi(s[j+3],s[j+4],v);s[j+4]=chi(s[j+4],v,w);
+		}
+		/* iota: a[0,0] ^= round constant */
+		s[0] ^= keccak_round_constants[ 0];
 
-        // das Hash erzeugen
-        uint32_t hash[16];
+		#if __CUDA_ARCH__ > 500
+		#pragma unroll 4
+		#else
+		#pragma unroll 3
+		#endif
+		for (int i = 1; i < 23; i++) {
+			/*theta*/
+			#pragma unroll 5
+			for(int j=0;j<5;j++){
+				t[ j] = vectorize(xor5(devectorize(s[ j]),devectorize(s[j+5]),devectorize(s[j+10]),devectorize(s[j+15]),devectorize(s[j+20])));
+			}
 
-#pragma unroll 8
-        for (size_t i = 0; i < 64; i += 8) {
-            U64TO32_LE((&hash[i/4]), keccak_gpu_state[i / 8]);
-        }
+			/*theta*/
+			#pragma unroll 5
+			for(int j=0;j<5;j++){
+				u[ j] = ROL2(t[ j], 1);
+			}
+			s[ 4] = xor3x(s[ 4], t[3], u[ 0]);s[ 9] = xor3x(s[ 9], t[3], u[ 0]);s[14] = xor3x(s[14], t[3], u[ 0]);s[19] = xor3x(s[19], t[3], u[ 0]);s[24] = xor3x(s[24], t[3], u[ 0]);
+			s[ 0] = xor3x(s[ 0], t[4], u[ 1]);s[ 5] = xor3x(s[ 5], t[4], u[ 1]);s[10] = xor3x(s[10], t[4], u[ 1]);s[15] = xor3x(s[15], t[4], u[ 1]);s[20] = xor3x(s[20], t[4], u[ 1]);
+			s[ 1] = xor3x(s[ 1], t[0], u[ 2]);s[ 6] = xor3x(s[ 6], t[0], u[ 2]);s[11] = xor3x(s[11], t[0], u[ 2]);s[16] = xor3x(s[16], t[0], u[ 2]);s[21] = xor3x(s[21], t[0], u[ 2]);
+			s[ 2] = xor3x(s[ 2], t[1], u[ 3]);s[ 7] = xor3x(s[ 7], t[1], u[ 3]);s[12] = xor3x(s[12], t[1], u[ 3]);s[17] = xor3x(s[17], t[1], u[ 3]);s[22] = xor3x(s[22], t[1], u[ 3]);
+			s[ 3] = xor3x(s[ 3], t[2], u[ 4]);s[ 8] = xor3x(s[ 8], t[2], u[ 4]);s[13] = xor3x(s[13], t[2], u[ 4]);s[18] = xor3x(s[18], t[2], u[ 4]);s[23] = xor3x(s[23], t[2], u[ 4]);
 
-        // fertig
-        uint32_t *outpHash = (uint32_t*)&g_hash[8 * hashPosition];
+			/* rho pi: b[..] = rotl(a[..], ..) */
+			v = s[1];
+			s[1]  = ROL2(s[6], 44);
+			s[6]  = ROL2(s[9], 20);
+			s[9]  = ROL2(s[22], 61);
+			s[22] = ROL2(s[14], 39);
+			s[14] = ROL2(s[20], 18);
+			s[20] = ROL2(s[2], 62);
+			s[2]  = ROL2(s[12], 43);
+			s[12] = ROL2(s[13], 25);
+			s[13] = ROL8(s[19]);
+			s[19] = ROR8(s[23]);
+			s[23] = ROL2(s[15], 41);
+			s[15] = ROL2(s[4], 27);
+			s[4]  = ROL2(s[24], 14);
+			s[24] = ROL2(s[21], 2);
+			s[21] = ROL2(s[8], 55);
+			s[8]  = ROL2(s[16], 45);
+			s[16] = ROL2(s[5], 36);
+			s[5]  = ROL2(s[3], 28);
+			s[3]  = ROL2(s[18], 21);
+			s[18] = ROL2(s[17], 15);
+			s[17] = ROL2(s[11], 10);
+			s[11] = ROL2(s[7], 6);
+			s[7]  = ROL2(s[10], 3);
+			s[10] = ROL2(v, 1);
 
-#pragma unroll 16
-        for(int i=0;i<16;i++)
-            outpHash[i] = hash[i];
-    }
+			/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+			#pragma unroll 5
+			for(int j=0;j<25;j+=5){
+				v=s[j];w=s[j + 1];s[j] = chi(v,w,s[j+2]);s[j+1] = chi(w,s[j+2],s[j+3]);s[j+2]=chi(s[j+2],s[j+3],s[j+4]);s[j+3]=chi(s[j+3],s[j+4],v);s[j+4]=chi(s[j+4],v,w);
+			}
+
+			/* iota: a[0,0] ^= round constant */
+			s[0] ^= keccak_round_constants[i];
+		}
+		/*theta*/
+		#pragma unroll 5
+		for(int j=0;j<5;j++){
+			t[ j] = xor3x(xor3x(s[j+0],s[j+5],s[j+10]),s[j+15],s[j+20]);
+		}
+		/*theta*/
+		u[ 0] = ROL2(t[ 0],1);
+		u[ 1] = ROL2(t[ 1],1);
+		s[18] = xor3x(s[18], t[2], ROL2(t[ 4],1));
+		s[24] = xor3x(s[24], t[3], u[ 0]);
+		s[ 0] = xor3x(s[ 0], t[4], u[ 1]);
+		/* rho pi: b[..] = rotl(a[..], ..) */
+		s[ 3]  = ROL2(s[18], 21);
+		s[ 4]  = ROL2(s[24], 14);
+		/* chi: a[i,j] ^= ~b[i,j+1] & b[i,j+2] */
+		if(devectorize(chi(s[ 3],s[ 4],s[ 0])) <= target){
+			const uint32_t tmp = atomicExch(&resNonce[0], hashPosition);
+			if (tmp != UINT32_MAX)
+				resNonce[1] = tmp;
+		}
+	}
 }
 
-// Setup-Funktionen
-__host__ void quark_keccak512_cpu_init(int thr_id, int threads)
+__host__
+void quark_keccak512_cpu_init(int thr_id, uint32_t threads)
 {
-    // Kopiere die Hash-Tabellen in den GPU-Speicher
-    cudaMemcpyToSymbol( c_keccak_round_constants,
-                        host_keccak_round_constants,
-                        sizeof(host_keccak_round_constants),
-                        0, cudaMemcpyHostToDevice);
+
 }
 
-__host__ void quark_keccak512_cpu_hash_64(int thr_id, int threads, uint32_t startNounce, uint32_t *d_nonceVector, uint32_t *d_hash, int order)
+__host__
+void quark_keccak512_cpu_hash_64(int thr_id, uint32_t threads,uint32_t *d_nonceVector, uint32_t *d_hash)
 {
-    const int threadsperblock = 256;
+	uint32_t tpb = TPB52;
+	int dev_id = device_map[thr_id];
+	if (device_sm[dev_id] <= 500) tpb = TPB50;
+	const dim3 grid((threads + tpb-1)/tpb);
+	const dim3 block(tpb);
 
-    // berechne wie viele Thread Blocks wir brauchen
-    dim3 grid((threads + threadsperblock-1)/threadsperblock);
-    dim3 block(threadsperblock);
+	quark_keccak512_gpu_hash_64<<<grid, block>>>(threads, (uint2*)d_hash, d_nonceVector);
+}
 
-    // Größe des dynamischen Shared Memory Bereichs
-    size_t shared_size = 0;
+__host__
+void quark_keccak512_cpu_hash_64_final(int thr_id, uint32_t threads, uint32_t *d_nonceVector, uint32_t *d_hash, uint64_t target, uint32_t *d_resNonce)
+{
+	uint32_t tpb = TPB52;
+	int dev_id = device_map[thr_id];
+	if (device_sm[dev_id] <= 500) tpb = TPB50;
+	const dim3 grid((threads + tpb-1)/tpb);
+	const dim3 block(tpb);
 
-    quark_keccak512_gpu_hash_64<<<grid, block, shared_size>>>(threads, startNounce, (uint64_t*)d_hash, d_nonceVector);
-    MyStreamSynchronize(NULL, order, thr_id);
+	quark_keccak512_gpu_hash_64_final<<<grid, block>>>(threads, (uint2*)d_hash, d_nonceVector, d_resNonce, target);
 }

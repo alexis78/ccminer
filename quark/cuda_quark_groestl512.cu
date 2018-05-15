@@ -1,173 +1,125 @@
-// Auf QuarkCoin spezialisierte Version von Groestl inkl. Bitslice
+/*
+//	Auf QuarkCoin spezialisierte Version von Groestl inkl. Bitslice
+	Based upon Christians, Tanguy Pruvot's and SP's work
+		
+	Provos Alexis - 2016
+*/
 
-#include <cuda.h>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+#include "cuda_vectors.h"
+#include "cuda_helper.h"
 
-#include <stdio.h>
-#include <memory.h>
+#define TPB52 512
+#define TPB50 512
+#define THF 4
 
-// aus cpu-miner.c
-extern int device_map[8];
+#include "quark/groestl_functions_quad.h"
+#include "quark/groestl_transf_quad.h"
 
-// aus heavy.cu
-extern cudaError_t MyStreamSynchronize(cudaStream_t stream, int situation, int thr_id);
+__constant__ const uint32_t msg[2][4] = {
+						{0x00000080,0,0,0},
+						{0,0,0,0x01000000}
+					};
 
-// Folgende Definitionen später durch header ersetzen
-typedef unsigned char uint8_t;
-typedef unsigned short uint16_t;
-typedef unsigned int uint32_t;
+#if __CUDA_ARCH__ > 500
+__global__ __launch_bounds__(TPB52, 2)
+#else
+__global__ __launch_bounds__(TPB50, 2)
+#endif
+void quark_groestl512_gpu_hash_64_quad(uint32_t threads, uint32_t* g_hash, uint32_t* g_nonceVector){
+	uint32_t msgBitsliced[8];
+	uint32_t state[8];
+	uint32_t output[16];
+	// durch 4 dividieren, weil jeweils 4 Threads zusammen ein Hash berechnen
+	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x) >> 2;
+	if (thread < threads){
+	        // GROESTL
+		const uint32_t hashPosition = (g_nonceVector == NULL) ? thread : __ldg(&g_nonceVector[thread]);
 
-// diese Struktur wird in der Init Funktion angefordert
-static cudaDeviceProp props[8];
+	        uint32_t *inpHash = &g_hash[hashPosition<<4];
 
-// 64 Register Variante für Compute 3.0
-#include "groestl_functions_quad.cu"
-#include "bitslice_transformations_quad.cu"
+	        const uint32_t thr = threadIdx.x & (THF-1);
 
-__global__ void __launch_bounds__(256, 4)
- quark_groestl512_gpu_hash_64_quad(int threads, uint32_t startNounce, uint32_t *g_hash, uint32_t *g_nonceVector)
-{
-    // durch 4 dividieren, weil jeweils 4 Threads zusammen ein Hash berechnen
-    int thread = (blockDim.x * blockIdx.x + threadIdx.x) >> 2;
-    if (thread < threads)
-    {
-        // GROESTL
-        uint32_t message[8];
-        uint32_t state[8];
+		uint32_t message[8] = {
+			#if __CUDA_ARCH__ > 500
+			__ldg(&inpHash[thr]), __ldg(&inpHash[(THF)+thr]), __ldg(&inpHash[(2 * THF) + thr]), __ldg(&inpHash[(3 * THF) + thr]),msg[0][thr], 0, 0, msg[1][thr]
+			#else
+			inpHash[thr], inpHash[(THF)+thr], inpHash[(2 * THF) + thr], inpHash[(3 * THF) + thr], msg[0][thr], 0, 0, msg[1][thr]
+			#endif
+		};
 
-        uint32_t nounce = (g_nonceVector != NULL) ? g_nonceVector[thread] : (startNounce + thread);
+		to_bitslice_quad(message, msgBitsliced);
 
-        int hashPosition = nounce - startNounce;
-        uint32_t *inpHash = &g_hash[hashPosition<<4];
+	        groestl512_progressMessage_quad(state, msgBitsliced,thr);
 
-#pragma unroll 4
-        for(int k=0;k<4;k++) message[k] = inpHash[(k<<2) + (threadIdx.x&0x03)];
-#pragma unroll 4
-        for(int k=4;k<8;k++) message[k] = 0;
+		from_bitslice_quad52(state, output);
 
-        if ((threadIdx.x&0x03) == 0) message[4] = 0x80;
-        if ((threadIdx.x&0x03) == 3) message[7] = 0x01000000;
+#if __CUDA_ARCH__ <= 500
+		output[0] = __byte_perm(output[0], __shfl(output[0], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[2] = __byte_perm(output[2], __shfl(output[2], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[4] = __byte_perm(output[4], __shfl(output[4], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[6] = __byte_perm(output[6], __shfl(output[6], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[8] = __byte_perm(output[8], __shfl(output[8], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[10] = __byte_perm(output[10], __shfl(output[10], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[12] = __byte_perm(output[12], __shfl(output[12], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[14] = __byte_perm(output[14], __shfl(output[14], (threadIdx.x + 1) & 3, 4), 0x7632);
+	
+		if (thr == 0 || thr == 2){
+			output[0 + 1] = __shfl(output[0], (threadIdx.x + 2) & 3, 4);
+			output[2 + 1] = __shfl(output[2], (threadIdx.x + 2) & 3, 4);
+			output[4 + 1] = __shfl(output[4], (threadIdx.x + 2) & 3, 4);
+			output[6 + 1] = __shfl(output[6], (threadIdx.x + 2) & 3, 4);
+			output[8 + 1] = __shfl(output[8], (threadIdx.x + 2) & 3, 4);
+			output[10 + 1] = __shfl(output[10], (threadIdx.x + 2) & 3, 4);
+			output[12 + 1] = __shfl(output[12], (threadIdx.x + 2) & 3, 4);
+			output[14 + 1] = __shfl(output[14], (threadIdx.x + 2) & 3, 4);		
+			if(thr==0){
+				*(uint2x4*)&inpHash[0] = *(uint2x4*)&output[0];
+				*(uint2x4*)&inpHash[8] = *(uint2x4*)&output[8];
+			}
+		}
+#else
+		output[0] = __byte_perm(output[0], __shfl(output[0], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[0 + 1] = __shfl(output[0], (threadIdx.x + 2) & 3, 4);
 
-        uint32_t msgBitsliced[8];
-        to_bitslice_quad(message, msgBitsliced);
+		output[2] = __byte_perm(output[2], __shfl(output[2], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[2 + 1] = __shfl(output[2], (threadIdx.x + 2) & 3, 4);
+		
+		output[4] = __byte_perm(output[4], __shfl(output[4], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[4 + 1] = __shfl(output[4], (threadIdx.x + 2) & 3, 4);
+		
+		output[6] = __byte_perm(output[6], __shfl(output[6], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[6 + 1] = __shfl(output[6], (threadIdx.x + 2) & 3, 4);
+		
+		output[8] = __byte_perm(output[8], __shfl(output[8], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[8 + 1] = __shfl(output[8], (threadIdx.x + 2) & 3, 4);
 
-        groestl512_progressMessage_quad(state, msgBitsliced);
+		output[10] = __byte_perm(output[10], __shfl(output[10], (threadIdx.x + 1) & 3, 4), 0x7610);
+		output[10 + 1] = __shfl(output[10], (threadIdx.x + 2) & 3, 4);
+		
+		output[12] = __byte_perm(output[12], __shfl(output[12], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[12 + 1] = __shfl(output[12], (threadIdx.x + 2) & 3, 4);
+		
+		output[14] = __byte_perm(output[14], __shfl(output[14], (threadIdx.x + 1) & 3, 4), 0x7632);
+		output[14 + 1] = __shfl(output[14], (threadIdx.x + 2) & 3, 4);
 
-        // Nur der erste von jeweils 4 Threads bekommt das Ergebns-Hash
-        uint32_t *outpHash = &g_hash[hashPosition<<4];
-        uint32_t hash[16];
-        from_bitslice_quad(state, hash);
-
-        if ((threadIdx.x & 0x03) == 0)
-        {
-#pragma unroll 16
-            for(int k=0;k<16;k++) outpHash[k] = hash[k];
-        }
-    }
+		if(thr==0){
+			*(uint2x4*)&inpHash[0] = *(uint2x4*)&output[0];
+			*(uint2x4*)&inpHash[8] = *(uint2x4*)&output[8];
+		}
+#endif
+	}
 }
 
-__global__ void __launch_bounds__(256, 4)
- quark_doublegroestl512_gpu_hash_64_quad(int threads, uint32_t startNounce, uint32_t *g_hash, uint32_t *g_nonceVector)
-{
-    int thread = (blockDim.x * blockIdx.x + threadIdx.x)>>2;
-    if (thread < threads)
-    {
-        // GROESTL
-        uint32_t message[8];
-        uint32_t state[8];
+__host__
+void quark_groestl512_cpu_hash_64(int thr_id, uint32_t threads, uint32_t *d_nonceVector, uint32_t *d_hash){
 
-        uint32_t nounce = (g_nonceVector != NULL) ? g_nonceVector[thread] : (startNounce + thread);
+	const int dev_id = device_map[thr_id];
+	// Compute 3.0 benutzt die registeroptimierte Quad Variante mit Warp Shuffle
+	// mit den Quad Funktionen brauchen wir jetzt 4 threads pro Hash, daher Faktor 4 bei der Blockzahl
+	// berechne wie viele Thread Blocks wir brauchen
+	uint32_t tpb = (device_sm[dev_id] <= 500) ? TPB50 : TPB52;
 
-        int hashPosition = nounce - startNounce;
-        uint32_t *inpHash = &g_hash[hashPosition<<4];
-
-#pragma unroll 4
-        for(int k=0;k<4;k++) message[k] = inpHash[(k<<2)+(threadIdx.x&0x03)];
-#pragma unroll 4
-        for(int k=4;k<8;k++) message[k] = 0;
-
-        if ((threadIdx.x&0x03) == 0) message[4] = 0x80;
-        if ((threadIdx.x&0x03) == 3) message[7] = 0x01000000;
-
-        uint32_t msgBitsliced[8];
-        to_bitslice_quad(message, msgBitsliced);
-
-        for (int round=0; round<2; round++)
-        {
-            groestl512_progressMessage_quad(state, msgBitsliced);
-
-            if (round < 1)
-            {
-                // Verkettung zweier Runden inclusive Padding.
-                msgBitsliced[ 0] = __byte_perm(state[ 0], 0x00800100, 0x4341 + (((threadIdx.x%4)==3)<<13));
-                msgBitsliced[ 1] = __byte_perm(state[ 1], 0x00800100, 0x4341);
-                msgBitsliced[ 2] = __byte_perm(state[ 2], 0x00800100, 0x4341);
-                msgBitsliced[ 3] = __byte_perm(state[ 3], 0x00800100, 0x4341);
-                msgBitsliced[ 4] = __byte_perm(state[ 4], 0x00800100, 0x4341);
-                msgBitsliced[ 5] = __byte_perm(state[ 5], 0x00800100, 0x4341);
-                msgBitsliced[ 6] = __byte_perm(state[ 6], 0x00800100, 0x4341);
-                msgBitsliced[ 7] = __byte_perm(state[ 7], 0x00800100, 0x4341 + (((threadIdx.x%4)==0)<<4));
-            }
-        }
-
-        // Nur der erste von jeweils 4 Threads bekommt das Ergebns-Hash
-        uint32_t *outpHash = &g_hash[hashPosition<<4];
-        uint32_t hash[16];
-        from_bitslice_quad(state, hash);
-
-        if ((threadIdx.x & 0x03) == 0)
-        {
-#pragma unroll 16
-            for(int k=0;k<16;k++) outpHash[k] = hash[k];
-        }
-    }
-}
-
-// Setup-Funktionen
-__host__ void quark_groestl512_cpu_init(int thr_id, int threads)
-{
-    cudaGetDeviceProperties(&props[thr_id], device_map[thr_id]);
-}
-
-__host__ void quark_groestl512_cpu_hash_64(int thr_id, int threads, uint32_t startNounce, uint32_t *d_nonceVector, uint32_t *d_hash, int order)
-{
-    int threadsperblock = 256;
-
-    // Compute 3.0 benutzt die registeroptimierte Quad Variante mit Warp Shuffle
-    // mit den Quad Funktionen brauchen wir jetzt 4 threads pro Hash, daher Faktor 4 bei der Blockzahl
-    const int factor = 4;
-
-    // berechne wie viele Thread Blocks wir brauchen
-    dim3 grid(factor*((threads + threadsperblock-1)/threadsperblock));
-    dim3 block(threadsperblock);
-
-    // Größe des dynamischen Shared Memory Bereichs
-    size_t shared_size = 0;
-
-    quark_groestl512_gpu_hash_64_quad<<<grid, block, shared_size>>>(threads, startNounce, d_hash, d_nonceVector);
-
-    // Strategisches Sleep Kommando zur Senkung der CPU Last
-    MyStreamSynchronize(NULL, order, thr_id);
-}
-
-__host__ void quark_doublegroestl512_cpu_hash_64(int thr_id, int threads, uint32_t startNounce, uint32_t *d_nonceVector, uint32_t *d_hash, int order)
-{
-    int threadsperblock = 256;
-
-    // Compute 3.0 benutzt die registeroptimierte Quad Variante mit Warp Shuffle
-    // mit den Quad Funktionen brauchen wir jetzt 4 threads pro Hash, daher Faktor 4 bei der Blockzahl
-    const int factor = 4;
-
-    // berechne wie viele Thread Blocks wir brauchen
-    dim3 grid(factor*((threads + threadsperblock-1)/threadsperblock));
-    dim3 block(threadsperblock);
-
-    // Größe des dynamischen Shared Memory Bereichs
-    size_t shared_size = 0;
-
-    quark_doublegroestl512_gpu_hash_64_quad<<<grid, block, shared_size>>>(threads, startNounce, d_hash, d_nonceVector);
-
-    // Strategisches Sleep Kommando zur Senkung der CPU Last
-    MyStreamSynchronize(NULL, order, thr_id);
+	dim3 grid((THF*threads + tpb-1)/tpb);
+	dim3 block(tpb);
+	quark_groestl512_gpu_hash_64_quad<<<grid, block>>>(threads, d_hash, d_nonceVector);
 }

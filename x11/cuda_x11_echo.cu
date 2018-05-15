@@ -1,236 +1,449 @@
-#include <cuda.h>
-#include "cuda_runtime.h"
-#include "device_launch_parameters.h"
+/*
+	Based on Tanguy Pruvot's repo
+	Provos Alexis - 2016
+*/
 
-#include <stdio.h>
-#include <memory.h>
+#include "cuda_helper.h"
+#include "cuda_vectors.h"
 
-// Folgende Definitionen sp‰ter durch header ersetzen
-typedef unsigned char uint8_t;
-typedef unsigned int uint32_t;
-typedef unsigned long long uint64_t;
+#define INTENSIVE_GMF
+#include "cuda_x11_aes.cuh"
 
-// das Hi Word aus einem 64 Bit Typen extrahieren
-static __device__ uint32_t HIWORD(const uint64_t &x) {
-#if __CUDA_ARCH__ >= 130
-	return (uint32_t)__double2hiint(__longlong_as_double(x));
-#else
-	return (uint32_t)(x >> 32);
-#endif
-}
-
-// das Lo Word aus einem 64 Bit Typen extrahieren
-static __device__ uint32_t LOWORD(const uint64_t &x) {
-#if __CUDA_ARCH__ >= 130
-	return (uint32_t)__double2loint(__longlong_as_double(x));
-#else
-	return (uint32_t)(x & 0xFFFFFFFFULL);
-#endif
-}
-
-#define SPH_C64(x)    ((uint64_t)(x ## ULL))
-#define SPH_C32(x)    ((uint32_t)(x ## U))
-
-// aus heavy.cu
-extern cudaError_t MyStreamSynchronize(cudaStream_t stream, int situation, int thr_id);
-
-#include "cuda_x11_aes.cu"
-
-__device__ __forceinline__ void AES_2ROUND(
-	const uint32_t* __restrict__ sharedMemory,
-	uint32_t &x0, uint32_t &x1, uint32_t &x2, uint32_t &x3,
-	uint32_t &k0, uint32_t &k1, uint32_t &k2, uint32_t &k3)
-{
-	uint32_t y0, y1, y2, y3;
-	
-	aes_round(sharedMemory,
-		x0, x1, x2, x3,
-		k0,
-		y0, y1, y2, y3);
-
-	aes_round(sharedMemory,
-		y0, y1, y2, y3,
-		x0, x1, x2, x3);
-
-	// hier werden wir ein carry brauchen (oder auch nicht)
-	k0++;
-}
-
-__device__ __forceinline__ void cuda_echo_round(
-	const uint32_t *sharedMemory,
-	uint32_t &k0, uint32_t &k1, uint32_t &k2, uint32_t &k3,
-	uint32_t *W, int round)
-{
-	// W hat 16*4 als Abmaﬂe
-
+__device__
+static void echo_round(const uint32_t sharedMemory[4][256], uint32_t *W, uint32_t &k0){
 	// Big Sub Words
-#pragma unroll 16
-	for(int i=0;i<16;i++)
-	{
-		int idx = i<<2; // *4
-		AES_2ROUND(sharedMemory,
-			W[idx+0], W[idx+1], W[idx+2], W[idx+3],
-			k0, k1, k2, k3);
-	}
+	#pragma unroll 16
+	for (int idx = 0; idx < 16; idx++)
+		AES_2ROUND(sharedMemory,W[(idx<<2) + 0], W[(idx<<2) + 1], W[(idx<<2) + 2], W[(idx<<2) + 3], k0);
 
 	// Shift Rows
-#pragma unroll 4
-	for(int i=0;i<4;i++)
-	{
-		uint32_t t;
-
+	#pragma unroll 4
+	for (int i = 0; i < 4; i++){
+		uint32_t t[4];
 		/// 1, 5, 9, 13
-		t = W[4 + i];
-		W[4 + i] = W[20 + i];
-		W[20 + i] = W[36 + i];
-		W[36 + i] = W[52 + i];
-		W[52 + i] = t;
+		t[0] = W[i+ 4];
+		t[1] = W[i+ 8];
+		t[2] = W[i+24];
+		t[3] = W[i+60];
+		W[i + 4] = W[i + 20];
+		W[i + 8] = W[i + 40];
+		W[i +24] = W[i + 56];
+		W[i +60] = W[i + 44];
 
-		// 2, 6, 10, 14
-		t = W[8 + i];
-		W[8 + i] = W[40 + i];
-		W[40 + i] = t;
-		t = W[24 + i];
-		W[24 + i] = W[56 + i];
-		W[56 + i] = t;
-
-		// 15, 11, 7, 3
-		t = W[60 + i];
-		W[60 + i] = W[44 + i];
-		W[44 + i] = W[28 + i];
-		W[28 + i] = W[12 + i];
-		W[12 + i] = t;
+		W[i +20] = W[i +36];
+		W[i +40] = t[1];
+		W[i +56] = t[2];
+		W[i +44] = W[i +28];
+				
+		W[i +28] = W[i +12];
+		W[i +12] = t[3];
+		W[i +36] = W[i +52];
+		W[i +52] = t[0];
 	}
-
 	// Mix Columns
-#pragma unroll 4
-	for(int i=0;i<4;i++) // Schleife ¸ber je 2*uint32_t
-	{
-#pragma unroll 4
-		for(int j=0;j<4;j++) // Schleife ¸ber die elemnte
-		{
-			int idx = j<<2; // j*4
+	#pragma unroll 4
+	for (int i = 0; i < 4; i++){ // Schleife √ºber je 2*uint32_t
+		#pragma unroll 4
+		for (int idx = 0; idx < 64; idx += 16){ // Schleife √ºber die elemnte
+			uint32_t a[4];
+			a[0] = W[idx + i];
+			a[1] = W[idx + i + 4];
+			a[2] = W[idx + i + 8];
+			a[3] = W[idx + i +12];
 
-			uint32_t a = W[ ((idx + 0)<<2) + i];
-			uint32_t b = W[ ((idx + 1)<<2) + i];
-			uint32_t c = W[ ((idx + 2)<<2) + i];
-			uint32_t d = W[ ((idx + 3)<<2) + i];
+			uint32_t ab = a[0] ^ a[1];
+			uint32_t bc = a[1] ^ a[2];
+			uint32_t cd = a[2] ^ a[3];
+
+			uint32_t t, t2, t3;
+			t = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			uint32_t abx = (t  >> 7) * 27U ^ ((ab^t) << 1);
+			uint32_t bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			uint32_t cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[idx + i] = bc ^ a[3] ^ abx;
+			W[idx + i + 4] = a[0] ^ cd ^ bcx;
+			W[idx + i + 8] = ab ^ a[3] ^ cdx;
+			W[idx + i +12] = ab ^ a[2] ^ (abx ^ bcx ^ cdx);
+		}
+	}
+}
+
+__global__ __launch_bounds__(256, 3) /* will force 80 registers */
+static void x11_echo512_gpu_hash_64_final(uint32_t threads, uint64_t *g_hash,uint32_t* resNonce, const uint64_t target){
+	__shared__ uint32_t sharedMemory[4][256];
+
+	aes_gpu_init256(sharedMemory);
+
+	const uint32_t P[48] = {
+		0xe7e9f5f5, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,0xa4213d7e, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+		//8-12
+		0x01425eb8, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,0x65978b09, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+		//21-25
+		0x2cb6b661, 0x6b23b3b3, 0xcf93a7cf, 0x9d9d3751,0x9ac2dea3, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+		//34-38
+		0x579f9f33, 0xfbfbfbfb, 0xfbfbfbfb, 0xefefd3c7,0xdbfde1dd, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+		0x34514d9e, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,0xb134347e, 0xea6f7e7e, 0xbd7731bd, 0x8a8a1968,
+		0x14b8a457, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,0x265f4382, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af
+		//58-61
+	};
+	uint32_t k0;
+	uint32_t h[16];
+
+	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
+	
+	if (thread < threads){
+
+		const uint32_t *hash = (uint32_t*)&g_hash[thread<<3];
+
+		*(uint2x4*)&h[ 0] = __ldg4((uint2x4*)&hash[ 0]);
+		*(uint2x4*)&h[ 8] = __ldg4((uint2x4*)&hash[ 8]);
+
+		uint64_t backup = *(uint64_t*)&h[ 6];
+
+		k0 = 512 + 8;
+
+		#pragma unroll 4
+		for (uint32_t idx = 0; idx < 16; idx += 4)
+			AES_2ROUND(sharedMemory,h[idx + 0], h[idx + 1], h[idx + 2], h[idx + 3], k0);
+
+		k0 += 4;
+
+		uint32_t W[64];
+
+		#pragma unroll 4
+		for (uint32_t i = 0; i < 4; i++){
+			uint32_t a = P[i];
+			uint32_t b = P[i + 4];
+			uint32_t c = h[i + 8];
+			uint32_t d = P[i + 8];
 
 			uint32_t ab = a ^ b;
 			uint32_t bc = b ^ c;
 			uint32_t cd = c ^ d;
 
-			uint32_t t;
-			t = ((ab & 0x80808080) >> 7);
-			uint32_t abx = t<<4 ^ t<<3 ^ t<<1 ^ t;
-			t = ((bc & 0x80808080) >> 7);
-			uint32_t bcx = t<<4 ^ t<<3 ^ t<<1 ^ t;
-			t = ((cd & 0x80808080) >> 7);
-			uint32_t cdx = t<<4 ^ t<<3 ^ t<<1 ^ t;
 
-			abx ^= ((ab & 0x7F7F7F7F) << 1);
-			bcx ^= ((bc & 0x7F7F7F7F) << 1);
-			cdx ^= ((cd & 0x7F7F7F7F) << 1);
+			uint32_t t =  ((a ^ b) & 0x80808080);
+			uint32_t t2 = ((b ^ c) & 0x80808080);
+			uint32_t t3 = ((c ^ d) & 0x80808080);
 
-			W[ ((idx + 0)<<2) + i] = abx ^ bc ^ d;
-			W[ ((idx + 1)<<2) + i] = bcx ^ a ^ cd;
-			W[ ((idx + 2)<<2) + i] = cdx ^ ab ^ d;
-			W[ ((idx + 3)<<2) + i] = abx ^ bcx ^ cdx ^ ab ^ c;
+			uint32_t abx = ((t  >> 7) * 27U) ^ ((ab^t) << 1);
+			uint32_t bcx = ((t2 >> 7) * 27U) ^ ((bc^t2) << 1);
+			uint32_t cdx = ((t3 >> 7) * 27U) ^ ((cd^t3) << 1);
+
+			W[0 + i] = bc ^ d ^ abx;
+			W[4 + i] = a ^ cd ^ bcx;
+			W[8 + i] = ab ^ d ^ cdx;
+			W[12+ i] = abx ^ bcx ^ cdx ^ ab ^ c;
+
+			a = P[12 + i];
+			b = h[i + 4];
+			c = P[12 + i + 4];
+			d = P[12 + i + 8];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+
+			t  = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t  >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[16 + i] = abx ^ bc ^ d;
+			W[16 + i + 4] = bcx ^ a ^ cd;
+			W[16 + i + 8] = cdx ^ ab ^ d;
+			W[16 + i +12] = abx ^ bcx ^ cdx ^ ab ^ c;
+
+			a = h[i];
+			b = P[24 + i];
+			c = P[24 + i + 4];
+			d = P[24 + i + 8];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+
+			t = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t  >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[32 + i] = abx ^ bc ^ d;
+			W[32 + i + 4] = bcx ^ a ^ cd;
+			W[32 + i + 8] = cdx ^ ab ^ d;
+			W[32 + i +12] = abx ^ bcx ^ cdx ^ ab ^ c;
+
+			a = P[36 + i ];
+			b = P[36 + i + 4];
+			c = P[36 + i + 8];
+			d = h[i + 12];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+			t  = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t  >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[48 + i] = abx ^ bc ^ d;
+			W[48 + i + 4] = bcx ^ a ^ cd;
+			W[48 + i + 8] = cdx ^ ab ^ d;
+			W[48 + i +12] = abx ^ bcx ^ cdx ^ ab ^ c;
+		}
+		
+		for (int k = 1; k < 9; k++)
+			echo_round(sharedMemory,W,k0);
+		// Big Sub Words
+		uint32_t y0, y1, y2, y3;
+//		AES_2ROUND(sharedMemory,W[ 0], W[ 1], W[ 2], W[ 3], k0);
+		aes_round(sharedMemory, W[ 0], W[ 1], W[ 2], W[ 3], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[ 0], W[ 1], W[ 2], W[ 3]);
+//		AES_2ROUND(sharedMemory,W[ 4], W[ 5], W[ 6], W[ 7], k0);
+		aes_round(sharedMemory, W[ 4], W[ 5], W[ 6], W[ 7], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[ 4], W[ 5], W[ 6], W[ 7]);
+//		AES_2ROUND(sharedMemory,W[ 8], W[ 9], W[10], W[11], k0);
+		aes_round(sharedMemory, W[ 8], W[ 9], W[10], W[11], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[ 8], W[ 9], W[10], W[11]);
+		
+//		AES_2ROUND(sharedMemory,W[20], W[21], W[22], W[23], k0);
+		aes_round(sharedMemory, W[20], W[21], W[22], W[23], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[20], W[21], W[22], W[23]);
+//		AES_2ROUND(sharedMemory,W[28], W[29], W[30], W[31], k0);
+		aes_round(sharedMemory, W[28], W[29], W[30], W[31], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[28], W[29], W[30], W[31]);
+		
+//		AES_2ROUND(sharedMemory,W[32], W[33], W[34], W[35], k0);
+		aes_round(sharedMemory, W[32], W[33], W[34], W[35], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[32], W[33], W[34], W[35]);
+//		AES_2ROUND(sharedMemory,W[40], W[41], W[42], W[43], k0);
+		aes_round(sharedMemory, W[40], W[41], W[42], W[43], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[40], W[41], W[42], W[43]);
+		
+		aes_round(sharedMemory, W[52], W[53], W[54], W[55], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[52], W[53], W[54], W[55]);
+//		AES_2ROUND(sharedMemory,W[60], W[61], W[62], W[63], k0);
+		aes_round(sharedMemory, W[60], W[61], W[62], W[63], k0, y0, y1, y2, y3);
+		aes_round(sharedMemory, y0, y1, y2, y3, W[60], W[61], W[62], W[63]);
+		
+		uint32_t bc = W[22] ^ W[42];
+		uint32_t t2 = (bc & 0x80808080);
+		W[ 6] = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+
+		bc = W[23] ^ W[43];
+		t2 = (bc & 0x80808080);
+		W[ 7] = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+
+		bc = W[10] ^ W[54];
+		t2 = (bc & 0x80808080);
+		W[38] = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+
+		bc = W[11] ^ W[55];
+		t2 = (bc & 0x80808080);
+		W[39] = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+
+		uint64_t check = backup ^ *(uint64_t*)&W[2] ^ *(uint64_t*)&W[6] ^ *(uint64_t*)&W[10] ^ *(uint64_t*)&W[30] ^ *(uint64_t*)&W[34] ^ *(uint64_t*)&W[38] ^ *(uint64_t*)&W[42] ^ *(uint64_t*)&W[62];
+		if(check <= target){
+			uint32_t tmp = atomicExch(&resNonce[0], thread);
+			if (tmp != UINT32_MAX)
+				resNonce[1] = tmp;
 		}
 	}
 }
 
-__global__ void x11_echo512_gpu_hash_64(int threads, uint32_t startNounce, uint64_t *g_hash, uint32_t *g_nonceVector)
+__host__
+void x11_echo512_cpu_hash_64_final(int thr_id, uint32_t threads, uint32_t *d_hash, uint32_t *d_resNonce, const uint64_t target)
 {
-	__shared__ uint32_t sharedMemory[1024];
+	const uint32_t threadsperblock = 256;
 
-	aes_gpu_init(sharedMemory);
+	dim3 grid((threads + threadsperblock-1)/threadsperblock);
+	dim3 block(threadsperblock);
 
-	int thread = (blockDim.x * blockIdx.x + threadIdx.x);
-    if (thread < threads)
-    {
-        uint32_t nounce = (g_nonceVector != NULL) ? g_nonceVector[thread] : (startNounce + thread);
+	x11_echo512_gpu_hash_64_final<<<grid, block>>>(threads, (uint64_t*)d_hash,d_resNonce,target);
+}
 
-        int hashPosition = nounce - startNounce;
-        uint32_t *Hash = (uint32_t*)&g_hash[hashPosition<<3];
+__global__ __launch_bounds__(128, 5) /* will force 80 registers */
+static void x11_echo512_gpu_hash_64(uint32_t threads, uint32_t *g_hash)
+{
+	__shared__ uint32_t sharedMemory[4][256];
+
+	aes_gpu_init128(sharedMemory);
+
+	const uint32_t thread = (blockDim.x * blockIdx.x + threadIdx.x);
+	uint32_t k0;
+	uint32_t h[16];
+	uint32_t hash[16];
+	if (thread < threads){
+
+		uint32_t *Hash = &g_hash[thread<<4];
+
+		*(uint2x4*)&h[ 0] = __ldg4((uint2x4*)&Hash[ 0]);
+		*(uint2x4*)&h[ 8] = __ldg4((uint2x4*)&Hash[ 8]);
+		
+		*(uint2x4*)&hash[ 0] = *(uint2x4*)&h[ 0];
+		*(uint2x4*)&hash[ 8] = *(uint2x4*)&h[ 8];
+		
+		__syncthreads();
+
+		const uint32_t P[48] = {
+			0xe7e9f5f5, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af, 0xa4213d7e, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+			//8-12
+			0x01425eb8, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af, 0x65978b09, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+			//21-25
+			0x2cb6b661, 0x6b23b3b3, 0xcf93a7cf, 0x9d9d3751, 0x9ac2dea3, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+			//34-38
+			0x579f9f33, 0xfbfbfbfb, 0xfbfbfbfb, 0xefefd3c7, 0xdbfde1dd, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af,
+			0x34514d9e, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af, 0xb134347e, 0xea6f7e7e, 0xbd7731bd, 0x8a8a1968,
+			0x14b8a457, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af, 0x265f4382, 0xf5e7e9f5, 0xb3b36b23, 0xb3dbe7af
+			//58-61
+		};
+
+		k0 = 520;
+
+		#pragma unroll 4
+		for (uint32_t idx = 0; idx < 16; idx += 4)
+		{
+			AES_2ROUND(sharedMemory, h[idx + 0], h[idx + 1], h[idx + 2], h[idx + 3], k0);
+		}
+		k0 += 4;
 
 		uint32_t W[64];
-		uint32_t k0 = 512, k1 = 0, k2 = 0, k3 = 0; // K0 = bitlen
-		/* Initialisierung */
-#pragma unroll 8
-		for(int i=0;i<32;i+=4)
+
+		#pragma unroll 4
+		for (uint32_t i = 0; i < 4; i++)
 		{
-			W[i + 0] = 512;
-			W[i + 1] = 0;
-			W[i + 2] = 0;
-			W[i + 3] = 0;
+			uint32_t a = P[i];
+			uint32_t b = P[i + 4];
+			uint32_t c = h[i + 8];
+			uint32_t d = P[i + 8];
+
+			uint32_t ab = a ^ b;
+			uint32_t bc = b ^ c;
+			uint32_t cd = c ^ d;
+
+
+			uint32_t t =  (ab & 0x80808080);
+			uint32_t t2 = (bc & 0x80808080);
+			uint32_t t3 = (cd & 0x80808080);
+
+			uint32_t abx = (t  >> 7) * 27U ^ ((ab^t) << 1);
+			uint32_t bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			uint32_t cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[i] = abx ^ bc ^ d;
+			W[i + 4] = bcx ^ a ^ cd;
+			W[i + 8] = cdx ^ ab ^ d;
+			W[i +12] = abx ^ bcx ^ cdx ^ ab ^ c;
+
+			a = P[i +12];
+			b = h[i + 4];
+			c = P[i +16];
+			d = P[i +20];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+
+			t = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[16 + i] = bc ^ d ^ abx;
+			W[16 + i + 4] = a ^ cd ^ bcx;
+			W[16 + i + 8] = d ^ ab ^ cdx;
+			W[16 + i + 12] = c ^ ab ^ abx ^ bcx ^ cdx;
+
+			a = h[i];
+			b = P[24 + i + 0];
+			c = P[24 + i + 4];
+			d = P[24 + i + 8];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+
+			t = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[32 + i] = bc ^ d ^ abx;
+			W[32 + i + 4] = a ^ cd ^ bcx;
+			W[32 + i + 8] = d ^ ab ^ cdx;
+			W[32 + i + 12] = c ^ ab ^ abx ^ bcx ^ cdx;
+
+			a = P[36 + i ];
+			b = P[36 + i + 4];
+			c = P[36 + i + 8];
+			d = h[i + 12];
+
+			ab = a ^ b;
+			bc = b ^ c;
+			cd = c ^ d;
+
+			t = (ab & 0x80808080);
+			t2 = (bc & 0x80808080);
+			t3 = (cd & 0x80808080);
+
+			abx = (t >> 7) * 27U ^ ((ab^t) << 1);
+			bcx = (t2 >> 7) * 27U ^ ((bc^t2) << 1);
+			cdx = (t3 >> 7) * 27U ^ ((cd^t3) << 1);
+
+			W[48 + i] = bc ^ d ^ abx;
+			W[48 + i + 4] = a ^ cd ^ bcx;
+			W[48 + i + 8] = d ^ ab ^ cdx;
+			W[48 + i + 12] = c ^ ab ^ abx ^ bcx ^ cdx;
+
 		}
 
-		// kopiere 32-byte groﬂen hash
-#pragma unroll 16
-		for(int i=0;i<16;i++)
-			W[i+32] = Hash[i];
-		W[48] = 0x80; // fest
-#pragma unroll 10
-		for(int i=49;i<59;i++)
-			W[i] = 0;
-		W[59] = 0x02000000; // fest
-		W[60] = k0; // bitlen
-		W[61] = k1;
-		W[62] = k2;
-		W[63] = k3;
-		
-		for(int i=0;i<10;i++)
+		for (int k = 1; k < 10; k++)
+			echo_round(sharedMemory,W,k0);
+
+		#pragma unroll 4
+		for (int i = 0; i < 16; i += 4)
 		{
-			cuda_echo_round(sharedMemory, k0, k1, k2, k3, W, i);
+			W[i] ^= W[32 + i] ^ 512;
+			W[i + 1] ^= W[32 + i + 1];
+			W[i + 2] ^= W[32 + i + 2];
+			W[i + 3] ^= W[32 + i + 3];
 		}
-
-#pragma unroll 8
-		for(int i=0;i<32;i+=4)
-		{
-			W[i  ] ^= W[32 + i    ] ^ 512;
-			W[i+1] ^= W[32 + i + 1];
-			W[i+2] ^= W[32 + i + 2];
-			W[i+3] ^= W[32 + i + 3];
-		}
-
-#pragma unroll 16
-		for(int i=0;i<16;i++)
-			W[i] ^= Hash[i];
-
-		// tsiv: I feel	iffy about removing	this, but it seems to break	the	full hash
-		// fortunately for X11 the flipped bit lands outside the first 32 bytes	used as	the	final X11 hash
-		// try chaining	more algos after echo (X13)	and	boom
-		//W[8] ^= 0x10;
-
-		W[27] ^= 0x02000000;
-		W[28] ^= k0;
-
-#pragma unroll 16
-		for(int i=0;i<16;i++)
-			Hash[i] = W[i];
-    }
+		*(uint2x4*)&Hash[ 0] = *(uint2x4*)&hash[ 0] ^ *(uint2x4*)&W[ 0];
+		*(uint2x4*)&Hash[ 8] = *(uint2x4*)&hash[ 8] ^ *(uint2x4*)&W[ 8];
+	}
 }
 
-// Setup-Funktionen
-__host__ void x11_echo512_cpu_init(int thr_id, int threads)
-{
-	aes_cpu_init();
-}
+__host__
+void x11_echo512_cpu_hash_64(int thr_id, uint32_t threads, uint32_t *d_hash){
 
-__host__ void x11_echo512_cpu_hash_64(int thr_id, int threads, uint32_t startNounce, uint32_t *d_nonceVector, uint32_t *d_hash, int order)
-{
-    const int threadsperblock = 256;
+	const uint32_t threadsperblock = 128;
 
-    // berechne wie viele Thread Blocks wir brauchen
-    dim3 grid((threads + threadsperblock-1)/threadsperblock);
-    dim3 block(threadsperblock);
+	dim3 grid((threads + threadsperblock-1)/threadsperblock);
+	dim3 block(threadsperblock);
 
-    // Grˆﬂe des dynamischen Shared Memory Bereichs
-    size_t shared_size = 0;
-
-//    fprintf(stderr, "threads=%d, %d blocks, %d threads per block, %d bytes shared\n", threads, grid.x, block.x, shared_size);
-
-    x11_echo512_gpu_hash_64<<<grid, block, shared_size>>>(threads, startNounce, (uint64_t*)d_hash, d_nonceVector);
-    MyStreamSynchronize(NULL, order, thr_id);
+	x11_echo512_gpu_hash_64<<<grid, block>>>(threads, d_hash);
 }
